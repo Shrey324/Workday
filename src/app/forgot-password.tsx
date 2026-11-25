@@ -24,7 +24,7 @@ export default function ForgotPasswordScreen() {
       return;
     }
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    if (!/^[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       Alert.alert('Invalid email', 'Please enter a valid email address.');
       return;
     }

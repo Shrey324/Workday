@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
+import * as Linking from 'expo-linking';
 import { router } from 'expo-router';
 import {
   Alert,
@@ -15,35 +16,46 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../../lib/supabase';
+import { AccountPicker } from '../components/projects/AccountPicker';
+import { TeamTaskCard } from '../components/projects/TeamTaskCard';
+import { Feather } from '@expo/vector-icons';
+import {
+  createProject as createProjectRecord,
+  createProjectFileUrl,
+  createProjectTeam,
+  createTeamTask,
+  leaveProject,
+  listProjectInvitations,
+  listProjectMessages,
+  listProjectNotices,
+  listProjects,
+  listProjectTeams,
+  listTeamTasks,
+  respondToProjectInvitation,
+  searchProjectUsers,
+  sendProjectMessage,
+  updateProjectDetails,
+  updateTeamTask,
+  updateTeamTaskStatus,
+} from '../features/projects/api';
+import type {
+  ChatMessage,
+  Project,
+  ProjectInvitation,
+  ProjectNotice,
+  ProjectStatus,
+  ProjectTeam,
+  TeamTask,
+  UserProfile,
+} from '../features/projects/types';
 
-type ProjectStatus = 'In progress' | 'Completed' | 'On hold';
 type FilterStatus = 'All' | ProjectStatus;
-
-type Project = {
-  id: string;
-  title: string;
-  description: string;
-  deadline: string;
-  creator: string;
-  members: string[];
-  status: ProjectStatus;
-  tint: string;
-};
 
 type Attachment = {
   name: string;
   uri: string;
   mimeType?: string;
   size?: number;
-};
-
-type ChatMessage = {
-  id: string;
-  author: string;
-  initials: string;
-  time: string;
-  text: string;
-  attachment?: Attachment;
 };
 
 const colors = {
@@ -60,78 +72,12 @@ const colors = {
   amberBg: '#FBF2E3',
 };
 
-const dateAfter = (days: number) => {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return toDateInputValue(date);
-};
-
 const toDateInputValue = (date: Date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
-
-const initialProjects: Project[] = [
-  {
-    id: 'p-1',
-    title: 'Brand refresh',
-    description: 'A new visual identity for the next chapter.',
-    deadline: dateAfter(3),
-    creator: 'Maya Chen',
-    members: ['Maya Chen', 'Jordan Lee', 'Alex Morgan'],
-    status: 'In progress',
-    tint: '#F0E8DE',
-  },
-  {
-    id: 'p-2',
-    title: 'Q4 launch campaign',
-    description: 'Coordinating the launch across every channel.',
-    deadline: dateAfter(6),
-    creator: 'Jordan Lee',
-    members: ['Jordan Lee', 'Riley Park', 'Sam Rivera', 'Maya Chen'],
-    status: 'In progress',
-    tint: '#E8EAF4',
-  },
-  {
-    id: 'p-3',
-    title: 'Mobile app redesign',
-    description: 'A simpler, more thoughtful product experience.',
-    deadline: dateAfter(15),
-    creator: 'Sam Rivera',
-    members: ['Sam Rivera', 'Alex Morgan'],
-    status: 'On hold',
-    tint: '#E6EFEA',
-  },
-  {
-    id: 'p-4',
-    title: 'Customer research',
-    description: 'Turning customer conversations into clear next steps.',
-    deadline: dateAfter(-4),
-    creator: 'Alex Morgan',
-    members: ['Alex Morgan', 'Maya Chen', 'Jordan Lee'],
-    status: 'Completed',
-    tint: '#F2E7EB',
-  },
-];
-
-const sampleMessages: ChatMessage[] = [
-  {
-    id: 'm-1',
-    author: 'Maya Chen',
-    initials: 'MC',
-    time: '10:24 AM',
-    text: 'I’ve added the latest direction here. What do you think of the updated type pairing?',
-  },
-  {
-    id: 'm-2',
-    author: 'Jordan Lee',
-    initials: 'JL',
-    time: '10:31 AM',
-    text: 'Looks great — the contrast feels much clearer. I’ll share it with the team.',
-  },
-];
 
 const initialsFor = (name: string) =>
   name
@@ -173,27 +119,321 @@ const formatFileSize = (size?: number) => {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+const formatChatDay = (value: string) => {
+  const date = new Date(value);
+  const today = new Date();
+  const yesterday = new Date();
+  today.setHours(0, 0, 0, 0);
+  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setHours(0, 0, 0, 0);
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+
+  if (day.getTime() === today.getTime()) return 'Today';
+  if (day.getTime() === yesterday.getTime()) return 'Yesterday';
+  const thisWeek = new Date(today);
+  thisWeek.setDate(thisWeek.getDate() - 6);
+  if (day >= thisWeek) {
+    return date.toLocaleDateString(undefined, { weekday: 'short' });
+  }
+  return date.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  });
+};
+
+const formatChatTime = (value: string) =>
+  new Date(value).toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+
 export default function TabTwoScreen() {
-  const [projects, setProjects] = useState(initialProjects);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [filter, setFilter] = useState<FilterStatus>('All');
   const [search, setSearch] = useState('');
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  const [joinedByProject, setJoinedByProject] = useState<Record<string, boolean>>({});
   const [mutedByProject, setMutedByProject] = useState<Record<string, boolean>>({});
-  const [members, setMembers] = useState<string[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserName, setCurrentUserName] = useState('You');
+  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  const [invitations, setInvitations] = useState<ProjectInvitation[]>([]);
+  const [notices, setNotices] = useState<ProjectNotice[]>([]);
+  const [selectedUsers, setSelectedUsers] = useState<UserProfile[]>([]);
+  const [memberSuggestions, setMemberSuggestions] = useState<UserProfile[]>([]);
+  const [isSearchingMembers, setIsSearchingMembers] = useState(false);
   const [memberInput, setMemberInput] = useState('');
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [draftDeadline, setDraftDeadline] = useState('');
   const [draftStatus, setDraftStatus] = useState<ProjectStatus>('In progress');
-  const [messageDraft, setMessageDraft] = useState('');
-  const [pendingAttachment, setPendingAttachment] = useState<Attachment | null>(null);
   const [messagesByProject, setMessagesByProject] = useState<
     Record<string, ChatMessage[]>
-  >({ 'p-1': sampleMessages });
+  >({});
+  const [teamsByProject, setTeamsByProject] = useState<Record<string, ProjectTeam[]>>({});
+  const [tasksByTeam, setTasksByTeam] = useState<Record<string, TeamTask[]>>({});
+  const [messageDraft, setMessageDraft] = useState('');
+  const [pendingAttachment, setPendingAttachment] = useState<Attachment | null>(null);
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [mediaOnly, setMediaOnly] = useState(false);
+  const [isTeamCreateOpen, setIsTeamCreateOpen] = useState(false);
+  const [teamName, setTeamName] = useState('');
+  const [teamMemberIds, setTeamMemberIds] = useState<string[]>([]);
+  const [teamLeaderIds, setTeamLeaderIds] = useState<string[]>([]);
+  const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [taskTeamId, setTaskTeamId] = useState<string | null>(null);
+  const [taskTitle, setTaskTitle] = useState('');
+  const [taskDeadline, setTaskDeadline] = useState('');
+  const [isProjectEditOpen, setIsProjectEditOpen] = useState(false);
+  const [projectTitleDraft, setProjectTitleDraft] = useState('');
+  const [projectDescriptionDraft, setProjectDescriptionDraft] = useState('');
+  const [projectDeadlineDraft, setProjectDeadlineDraft] = useState('');
+  const [projectStatusDraft, setProjectStatusDraft] =
+    useState<ProjectStatus>('In progress');
 
   const activeProject = projects.find((project) => project.id === activeProjectId);
+  const isProjectAdmin = !!activeProject && activeProject.creatorId === currentUserId;
+  const refreshWorkspace = useCallback(async (userId: string) => {
+    const [nextProjects, nextInvitations, nextNotices] = await Promise.all([
+      listProjects(),
+      listProjectInvitations(userId),
+      listProjectNotices(userId),
+    ]);
+    setProjects(nextProjects);
+    setInvitations(nextInvitations);
+    setNotices(nextNotices);
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadUser = async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (error) {
+        console.error('Unable to load the signed-in user:', error);
+        Alert.alert('Unable to load account', error.message);
+        setIsLoadingProjects(false);
+        return;
+      }
+      if (!data.user) {
+        setIsLoadingProjects(false);
+        return;
+      }
+      if (!isMounted) return;
+      setCurrentUserId(data.user.id);
+      setCurrentUserName(
+        data.user.user_metadata?.full_name || data.user.email || 'You'
+      );
+    };
+    void loadUser();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentUserId) return;
+    let isMounted = true;
+    const loadWorkspace = async () => {
+      try {
+        await refreshWorkspace(currentUserId);
+      } catch (error) {
+        console.error('Unable to load project workspace:', error);
+        Alert.alert(
+          'Unable to load projects',
+          error instanceof Error ? error.message : 'Please try again.'
+        );
+      } finally {
+        if (isMounted) setIsLoadingProjects(false);
+      }
+    };
+    void loadWorkspace();
+
+    const channel = supabase
+      .channel(`project-inbox-${currentUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'project_members',
+          filter: `user_id=eq.${currentUserId}`,
+        },
+        () => {
+          void refreshWorkspace(currentUserId).catch((error) =>
+            console.error('Unable to refresh project invitations:', error)
+          );
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'project_notifications',
+          filter: `user_id=eq.${currentUserId}`,
+        },
+        () => {
+          void refreshWorkspace(currentUserId).catch((error) =>
+            console.error('Unable to refresh project notifications:', error)
+          );
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      void supabase.removeChannel(channel);
+    };
+  }, [currentUserId, refreshWorkspace]);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    let isMounted = true;
+    const refreshProject = async () => {
+      try {
+        const [messages, teams] = await Promise.all([
+          listProjectMessages(activeProjectId),
+          listProjectTeams(activeProjectId),
+        ]);
+        if (!isMounted) return;
+        setMessagesByProject((current) => ({ ...current, [activeProjectId]: messages }));
+        setTeamsByProject((current) => ({ ...current, [activeProjectId]: teams }));
+        const tasks = await listTeamTasks(teams.map((team) => team.id));
+        if (!isMounted) return;
+        setTasksByTeam((current) => {
+          const next = { ...current };
+          teams.forEach((team) => {
+            next[team.id] = tasks.filter((task) => task.teamId === team.id);
+          });
+          return next;
+        });
+      } catch (error) {
+        console.error('Unable to load project conversation and teams:', error);
+        Alert.alert(
+          'Unable to load project',
+          error instanceof Error ? error.message : 'Please try again.'
+        );
+      }
+    };
+    void refreshProject();
+
+    const channel = supabase
+      .channel(`project-detail-${activeProjectId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'project_chat_messages',
+          filter: `project_id=eq.${activeProjectId}`,
+        },
+        () => {
+          void listProjectMessages(activeProjectId)
+            .then((messages) =>
+              setMessagesByProject((current) => ({
+                ...current,
+                [activeProjectId]: messages,
+              }))
+            )
+            .catch((error) => console.error('Unable to refresh project chat:', error));
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'project_teams',
+          filter: `project_id=eq.${activeProjectId}`,
+        },
+        () => {
+          void listProjectTeams(activeProjectId)
+            .then((teams) => setTeamsByProject((current) => ({
+              ...current,
+              [activeProjectId]: teams,
+            })))
+            .catch((error) => console.error('Unable to refresh project teams:', error));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      void supabase.removeChannel(channel);
+    };
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    const activeTeams = teamsByProject[activeProjectId] ?? [];
+    if (activeTeams.length === 0) return;
+    const teamIds = activeTeams.map((team) => team.id);
+    const channels = activeTeams.map((team) =>
+      supabase
+        .channel(`team-tasks-${team.id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'project_team_tasks',
+            filter: `team_id=eq.${team.id}`,
+          },
+          () => {
+            void listTeamTasks(teamIds)
+              .then((tasks) => {
+                setTasksByTeam((current) => {
+                  const next = { ...current };
+                  teamIds.forEach((teamId) => {
+                    next[teamId] = tasks.filter((task) => task.teamId === teamId);
+                  });
+                  return next;
+                });
+              })
+              .catch((error) => console.error('Unable to refresh team tasks:', error));
+          }
+        )
+        .subscribe()
+    );
+    return () => {
+      channels.forEach((channel) => void supabase.removeChannel(channel));
+    };
+  }, [activeProjectId, teamsByProject]);
+
+  useEffect(() => {
+    if (!isCreateOpen || !currentUserId || memberInput.trim().length < 2) {
+      setMemberSuggestions([]);
+      setIsSearchingMembers(false);
+      return;
+    }
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      setIsSearchingMembers(true);
+      void searchProjectUsers(memberInput, currentUserId)
+        .then((users) => {
+          if (isMounted) {
+            setMemberSuggestions(
+              users.filter((user) => !selectedUsers.some((selected) => selected.id === user.id))
+            );
+          }
+        })
+        .catch((error) => {
+          console.error('Unable to search signed-up users:', error);
+          Alert.alert('User search failed', 'Please try searching again.');
+        })
+        .finally(() => {
+          if (isMounted) setIsSearchingMembers(false);
+        });
+    }, 250);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [currentUserId, isCreateOpen, memberInput, selectedUsers]);
+
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLowerCase();
     return projects.filter((project) => {
@@ -201,7 +441,7 @@ export default function TabTwoScreen() {
       const matchesSearch =
         !query ||
         project.title.toLowerCase().includes(query) ||
-        project.creator.toLowerCase().includes(query);
+        project.creatorName.toLowerCase().includes(query);
       return matchesFilter && matchesSearch;
     });
   }, [filter, projects, search]);
@@ -230,20 +470,19 @@ export default function TabTwoScreen() {
     setDraftDescription('');
     setDraftDeadline('');
     setDraftStatus('In progress');
-    setMembers([]);
+    setSelectedUsers([]);
+    setMemberInput('');
+    setMemberSuggestions([]);
+    setIsSearchingMembers(false);
+  };
+
+  const addMember = (user: UserProfile) => {
+    if (selectedUsers.some((member) => member.id === user.id)) return;
+    setSelectedUsers((current) => [...current, user]);
     setMemberInput('');
   };
 
-  const addMember = () => {
-    const name = memberInput.trim();
-    if (!name || members.some((member) => member.toLowerCase() === name.toLowerCase())) {
-      return;
-    }
-    setMembers((current) => [...current, name]);
-    setMemberInput('');
-  };
-
-  const createProject = () => {
+  const createProject = async () => {
     const title = draftTitle.trim();
     if (!title) {
       Alert.alert('Add a project title', 'Enter a title before creating the project.');
@@ -257,32 +496,31 @@ export default function TabTwoScreen() {
       Alert.alert('Check the deadline', 'Enter a valid date in YYYY-MM-DD format.');
       return;
     }
-    const projectMembers = [...members];
-    if (
-      memberInput.trim() &&
-      !projectMembers.some(
-        (member) => member.toLowerCase() === memberInput.trim().toLowerCase()
-      )
-    ) {
-      projectMembers.push(memberInput.trim());
+    if (!currentUserId) {
+      Alert.alert('Sign in required', 'Sign in before creating a project.');
+      return;
     }
-
-    const project: Project = {
-      id: `p-${Date.now()}`,
-      title,
-      description: draftDescription.trim(),
-      deadline: draftDeadline,
-      creator: 'You',
-      members: ['You', ...projectMembers],
-      status: draftStatus,
-      tint: '#EAE8F1',
-    };
-    setProjects((current) => [project, ...current]);
-    setJoinedByProject((current) => ({ ...current, [project.id]: true }));
-    setIsCreateOpen(false);
-    setFilter('All');
-    setSearch('');
-    resetCreateForm();
+    try {
+      await createProjectRecord({
+        title,
+        description: draftDescription.trim(),
+        deadline: draftDeadline,
+        status: draftStatus,
+        creatorId: currentUserId,
+        inviteeIds: selectedUsers.map((user) => user.id),
+      });
+      await refreshWorkspace(currentUserId);
+      setIsCreateOpen(false);
+      setFilter('All');
+      setSearch('');
+      resetCreateForm();
+    } catch (error) {
+      console.error('Unable to create project:', error);
+      Alert.alert(
+        'Unable to create project',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
   };
 
   const pickAttachment = async () => {
@@ -313,32 +551,76 @@ export default function TabTwoScreen() {
     }
   };
 
-  const sendMessage = () => {
+  const sendMessage = async () => {
     if (!activeProject || (!messageDraft.trim() && !pendingAttachment)) return;
-    const message: ChatMessage = {
-      id: `m-${Date.now()}`,
-      author: 'You',
-      initials: 'YO',
-      time: new Date().toLocaleTimeString(undefined, {
-        hour: 'numeric',
-        minute: '2-digit',
-      }),
-      text: messageDraft.trim(),
-      attachment: pendingAttachment ?? undefined,
-    };
-    setMessagesByProject((current) => ({
-      ...current,
-      [activeProject.id]: [...(current[activeProject.id] ?? []), message],
-    }));
-    setMessageDraft('');
-    setPendingAttachment(null);
+    if (!currentUserId) return;
+    setIsSendingMessage(true);
+    try {
+      await sendProjectMessage({
+        projectId: activeProject.id,
+        userId: currentUserId,
+        text: messageDraft.trim(),
+        attachment: pendingAttachment ?? undefined,
+      });
+      setMessageDraft('');
+      setPendingAttachment(null);
+      const messages = await listProjectMessages(activeProject.id);
+      setMessagesByProject((current) => ({ ...current, [activeProject.id]: messages }));
+    } catch (error) {
+      console.error('Unable to send project message:', error);
+      Alert.alert(
+        'Unable to send message',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    } finally {
+      setIsSendingMessage(false);
+    }
   };
 
-  const toggleProjectMembership = (projectId: string) => {
-    setJoinedByProject((current) => ({
-      ...current,
-      [projectId]: current[projectId] === false,
-    }));
+  const confirmLeaveProject = (project: Project) => {
+    if (!currentUserId || project.creatorId === currentUserId) return;
+    Alert.alert(
+      'Leave project?',
+      'Are you sure you want to leave the project?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Yes',
+          style: 'destructive',
+          onPress: () => {
+            void leaveProject(project.id, currentUserId)
+              .then(async () => {
+                if (activeProjectId === project.id) setActiveProjectId(null);
+                await refreshWorkspace(currentUserId);
+              })
+              .catch((error) => {
+                console.error('Unable to leave project:', error);
+                Alert.alert(
+                  'Unable to leave project',
+                  error instanceof Error ? error.message : 'Please try again.'
+                );
+              });
+          },
+        },
+      ]
+    );
+  };
+
+  const respondToInvitation = async (
+    invitation: ProjectInvitation,
+    accepted: boolean
+  ) => {
+    if (!currentUserId) return;
+    try {
+      await respondToProjectInvitation(invitation.projectId, currentUserId, accepted);
+      await refreshWorkspace(currentUserId);
+    } catch (error) {
+      console.error('Unable to respond to project invitation:', error);
+      Alert.alert(
+        'Unable to update invitation',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
   };
 
   const toggleProjectMute = (projectId: string) => {
@@ -352,10 +634,176 @@ export default function TabTwoScreen() {
     setActiveProjectId(projectId);
     setMessageDraft('');
     setPendingAttachment(null);
+    setMediaOnly(false);
+  };
+
+  const saveProjectDetails = async () => {
+    if (!activeProject) return;
+    if (!projectTitleDraft.trim()) {
+      Alert.alert('Add a project name', 'Project name cannot be empty.');
+      return;
+    }
+    if (!projectDescriptionDraft.trim()) {
+      Alert.alert('Add a description', 'Project description cannot be empty.');
+      return;
+    }
+    if (!isValidDate(projectDeadlineDraft)) {
+      Alert.alert('Check the deadline', 'Enter a valid date in YYYY-MM-DD format.');
+      return;
+    }
+    try {
+      await updateProjectDetails(activeProject.id, {
+        title: projectTitleDraft.trim(),
+        description: projectDescriptionDraft.trim(),
+        deadline: projectDeadlineDraft,
+        status: projectStatusDraft,
+      });
+      setProjects((current) =>
+        current.map((project) =>
+          project.id === activeProject.id
+            ? {
+              ...project,
+              title: projectTitleDraft.trim(),
+              description: projectDescriptionDraft.trim(),
+              deadline: projectDeadlineDraft,
+              status: projectStatusDraft,
+            }
+            : project
+        )
+      );
+      setIsProjectEditOpen(false);
+    } catch (error) {
+      console.error('Unable to update project details:', error);
+      Alert.alert(
+        'Unable to update project',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
+  const openTaskEditor = (teamId: string, task?: TeamTask) => {
+    setTaskTeamId(teamId);
+    setEditingTaskId(task?.id ?? null);
+    setTaskTitle(task?.title ?? '');
+    setTaskDeadline(task?.deadline ?? '');
+    setIsTaskModalOpen(true);
+  };
+
+  const saveTeamTask = async () => {
+    if (!taskTeamId) return;
+    if (!taskTitle.trim()) {
+      Alert.alert('Add a task', 'Enter a task description.');
+      return;
+    }
+    if (!isValidDate(taskDeadline)) {
+      Alert.alert('Check the deadline', 'Enter a valid date in YYYY-MM-DD format.');
+      return;
+    }
+    try {
+      if (editingTaskId) {
+        await updateTeamTask(editingTaskId, {
+          title: taskTitle.trim(),
+          deadline: taskDeadline,
+        });
+      } else {
+        await createTeamTask({
+          teamId: taskTeamId,
+          title: taskTitle.trim(),
+          deadline: taskDeadline,
+        });
+      }
+      const updatedTasks = await listTeamTasks(
+        (teamsByProject[activeProjectId ?? ''] ?? []).map((team) => team.id)
+      );
+      setTasksByTeam((current) => {
+        const next = { ...current };
+        Object.keys(next).forEach((teamId) => {
+          next[teamId] = updatedTasks.filter((task) => task.teamId === teamId);
+        });
+        return next;
+      });
+      setIsTaskModalOpen(false);
+      setTaskTeamId(null);
+      setEditingTaskId(null);
+      setTaskTitle('');
+      setTaskDeadline('');
+    } catch (error) {
+      console.error('Unable to save team task:', error);
+      Alert.alert(
+        'Unable to save task',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
+  const setTaskStatus = async (task: TeamTask, status: TeamTask['status']) => {
+    try {
+      await updateTeamTaskStatus(task.id, status);
+      setTasksByTeam((current) => ({
+        ...current,
+        [task.teamId]: (current[task.teamId] ?? []).map((item) =>
+          item.id === task.id ? { ...item, status } : item
+        ),
+      }));
+    } catch (error) {
+      console.error('Unable to update task status:', error);
+      Alert.alert(
+        'Unable to update task',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
+  const createTeam = async () => {
+    if (!activeProject || !teamName.trim()) {
+      Alert.alert('Name the team', 'Enter a name for this team.');
+      return;
+    }
+    if (teamMemberIds.length === 0) {
+      Alert.alert('Add team members', 'Choose at least one project member.');
+      return;
+    }
+    try {
+      await createProjectTeam({
+        projectId: activeProject.id,
+        name: teamName.trim(),
+        memberIds: teamMemberIds,
+        leaderIds: teamLeaderIds,
+      });
+      const teams = await listProjectTeams(activeProject.id);
+      setTeamsByProject((current) => ({ ...current, [activeProject.id]: teams }));
+      setTeamName('');
+      setTeamMemberIds([]);
+      setTeamLeaderIds([]);
+      setIsTeamCreateOpen(false);
+    } catch (error) {
+      console.error('Unable to create project team:', error);
+      Alert.alert(
+        'Unable to create team',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
+  const openFile = async (storagePath: string) => {
+    try {
+      const url = await createProjectFileUrl(storagePath);
+      await Linking.openURL(url);
+    } catch (error) {
+      console.error('Unable to open project file:', error);
+      Alert.alert(
+        'Unable to open file',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
   };
 
   if (activeProject) {
     const messages = messagesByProject[activeProject.id] ?? [];
+    const visibleMessages = mediaOnly
+      ? messages.filter((message) => message.attachment)
+      : messages;
+    const teams = teamsByProject[activeProject.id] ?? [];
     return (
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         <KeyboardAvoidingView
@@ -385,7 +833,7 @@ export default function TabTwoScreen() {
               accessibilityLabel={mutedByProject[activeProject.id] ? 'Unmute project' : 'Mute project'}
             >
               <Text style={styles.headerIconText}>
-                {mutedByProject[activeProject.id] ? '◖' : '◗'}
+                {mutedByProject[activeProject.id] ? '🔇' : '🔊'}
               </Text>
             </Pressable>
           </View>
@@ -404,19 +852,39 @@ export default function TabTwoScreen() {
               </View>
               <Text style={styles.summaryTitle}>{activeProject.title}</Text>
               <Text style={styles.summaryDescription}>{activeProject.description}</Text>
+              {isProjectAdmin && (
+                <Pressable
+                  onPress={() => {
+                    setProjectTitleDraft(activeProject.title);
+                    setProjectDescriptionDraft(activeProject.description);
+                    setProjectDeadlineDraft(activeProject.deadline);
+                    setProjectStatusDraft(activeProject.status);
+                    setIsProjectEditOpen(true);
+                  }}
+                  style={styles.editProjectButton}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.editProjectText}>
+                    <Feather name="edit-2" size={18} color="#000000" />
+                  </Text>
+                </Pressable>
+              )}
               <View style={styles.summaryDivider} />
               <View style={styles.summaryMetaRow}>
                 <View>
                   <Text style={styles.metaLabel}>CREATED BY</Text>
-                  <Text style={styles.metaValue}>{activeProject.creator}</Text>
+                  <View style={styles.creatorLine}>
+                    <Text style={styles.metaValue}>{activeProject.creatorName}</Text>
+                    <Text style={styles.adminLabel}>Admin</Text>
+                  </View>
                 </View>
                 <View style={styles.detailMemberMeta}>
                   <Text style={styles.metaLabel}>TEAM</Text>
                   <View style={styles.avatarStack}>
                     {activeProject.members.slice(0, 4).map((member, index) => (
                       <Avatar
-                        key={`${member}-${index}`}
-                        name={member}
+                        key={member.id}
+                        name={member.fullName}
                         tint={index % 2 === 0 ? '#EEE9E2' : '#E5EAF2'}
                         small
                       />
@@ -425,65 +893,194 @@ export default function TabTwoScreen() {
                       {activeProject.members.length} members
                     </Text>
                   </View>
+                  <View style={styles.memberNames}>
+                    {activeProject.members.map((member) => (
+                      <Text key={member.id} style={styles.memberName}>
+                        {member.fullName}
+                        {member.role === 'admin' ? (
+                          <Text style={styles.adminLabel}>  Admin</Text>
+                        ) : null}
+                      </Text>
+                    ))}
+                  </View>
                 </View>
               </View>
             </View>
+
+            <View style={styles.teamsHeading}>
+              <View>
+                <Text style={styles.chatTitle}>Project teams</Text>
+                <Text style={styles.chatSubtitle}>Smaller groups and their shared tasks.</Text>
+              </View>
+              {isProjectAdmin && (
+                <Pressable
+                  onPress={() => {
+                    setTeamName('');
+                    setTeamMemberIds([]);
+                    setTeamLeaderIds([]);
+                    setIsTeamCreateOpen(true);
+                  }}
+                  style={styles.smallActionButton}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.smallActionText}>Create teams</Text>
+                </Pressable>
+              )}
+            </View>
+            {teams.length === 0 ? (
+              <Text style={styles.noTeamsText}>
+                {isProjectAdmin
+                  ? 'Create a team and choose from accepted project members.'
+                  : 'No teams have been created yet.'}
+              </Text>
+            ) : (
+              teams.map((team) => {
+                const canManageTeam =
+                  isProjectAdmin ||
+                  team.members.some(
+                    (member) =>
+                      member.id === currentUserId && member.teamRole === 'leader'
+                  );
+                return (
+                  <View key={team.id} style={styles.teamCard}>
+                    <View style={styles.teamHeader}>
+                      <View style={styles.teamHeaderText}>
+                        <Text style={styles.teamName}>{team.name}</Text>
+                        <Text style={styles.teamMemberNames}>
+                          {team.members
+                            .map(
+                              (member) =>
+                                `${member.fullName}${member.teamRole === 'leader' ? ' (Leader)' : ''}`
+                            )
+                            .join(', ') || 'No members'}
+                        </Text>
+                      </View>
+                      {canManageTeam && (
+                        <Pressable
+                          onPress={() => openTaskEditor(team.id)}
+                          style={styles.smallActionButton}
+                          accessibilityRole="button"
+                        >
+                          <Text style={styles.smallActionText}>Assign task</Text>
+                        </Pressable>
+                      )}
+                    </View>
+                    {(tasksByTeam[team.id] ?? []).length === 0 ? (
+                      <Text style={styles.noTasksText}>No tasks assigned yet.</Text>
+                    ) : (
+                      (tasksByTeam[team.id] ?? []).map((task) => (
+                        <TeamTaskCard
+                          key={task.id}
+                          task={task}
+                          canManage={canManageTeam}
+                          onEdit={() => openTaskEditor(team.id, task)}
+                          onStatusChange={(status) => void setTaskStatus(task, status)}
+                        />
+                      ))
+                    )}
+                  </View>
+                );
+              })
+            )}
 
             <View style={styles.chatHeading}>
               <View>
                 <Text style={styles.chatTitle}>Team chat</Text>
                 <Text style={styles.chatSubtitle}>The conversation, all in one place.</Text>
               </View>
-              <Text style={styles.chatCount}>{messages.length} messages</Text>
+              <View style={styles.chatTools}>
+                <Pressable
+                  onPress={() => setMediaOnly((current) => !current)}
+                  style={[styles.mediaButton, mediaOnly && styles.mediaButtonActive]}
+                  accessibilityRole="button"
+                  accessibilityLabel={mediaOnly ? 'Show all chat messages' : 'Show shared media'}
+                >
+                  <Text style={[styles.mediaButtonText, mediaOnly && styles.mediaButtonTextActive]}>
+                    {mediaOnly ? 'All messages' : 'Media'}
+                  </Text>
+                </Pressable>
+                <Text style={styles.chatCount}>{messages.length} messages</Text>
+              </View>
             </View>
 
-            {messages.length === 0 ? (
+            {visibleMessages.length === 0 ? (
               <View style={styles.emptyChat}>
-                <Text style={styles.emptyChatTitle}>Start the conversation</Text>
+                <Text style={styles.emptyChatTitle}>
+                  {mediaOnly
+                    ? 'No shared media yet'
+                    : 'Start the conversation'}
+                </Text>
                 <Text style={styles.emptyChatText}>
-                  Share an update or ask your team a question.
+                  {mediaOnly
+                    ? 'Files shared in this project chat will appear here.'
+                    : 'Share an update or ask your team a question.'}
                 </Text>
               </View>
             ) : (
-              messages.map((message) => (
-                <View key={message.id} style={styles.messageRow}>
-                  <View
-                    style={[
-                      styles.messageAvatar,
-                      message.author === 'You' && styles.messageAvatarYou,
-                    ]}
-                  >
-                    <Text style={styles.messageAvatarText}>{message.initials}</Text>
-                  </View>
-                  <View style={styles.messageContent}>
-                    <View style={styles.messageMeta}>
-                      <Text style={styles.messageAuthor}>{message.author}</Text>
-                      <Text style={styles.messageTime}>{message.time}</Text>
-                    </View>
-                    {!!message.text && (
-                      <Text style={styles.messageText}>{message.text}</Text>
-                    )}
-                    {message.attachment && (
-                      <View style={styles.messageAttachment}>
-                        <View style={styles.fileIcon}>
-                          <Text style={styles.fileIconText}>
-                            {fileExtension(message.attachment.name)}
-                          </Text>
+              visibleMessages.map((message, index) => {
+                const attachment = message.attachment;
+                return (
+                  <View key={message.id}>
+                    {(index === 0 ||
+                      formatChatDay(visibleMessages[index - 1].createdAt) !==
+                      formatChatDay(message.createdAt)) && (
+                        <View style={styles.messageDateRow}>
+                          <Text style={styles.messageDate}>{formatChatDay(message.createdAt)}</Text>
                         </View>
-                        <View style={styles.fileDetails}>
-                          <Text style={styles.fileName} numberOfLines={1}>
-                            {message.attachment.name}
-                          </Text>
-                          <Text style={styles.fileSize}>
-                            {formatFileSize(message.attachment.size) || 'Attached file'}
-                          </Text>
+                      )}
+                    {message.kind === 'system' ? (
+                      <View style={styles.systemMessage}>
+                        <Text style={styles.systemMessageText}>{message.text}</Text>
+                      </View>
+                    ) : (
+                      <View style={styles.messageRow}>
+                        <View
+                          style={[
+                            styles.messageAvatar,
+                            message.authorId === currentUserId && styles.messageAvatarYou,
+                          ]}
+                        >
+                          <Text style={styles.messageAvatarText}>{message.initials}</Text>
                         </View>
-                        <Text style={styles.fileCheck}>✓</Text>
+                        <View style={styles.messageContent}>
+                          <View style={styles.messageMeta}>
+                            <Text style={styles.messageAuthor}>{message.author}</Text>
+                            <Text style={styles.messageTime}>
+                              {formatChatTime(message.createdAt)}
+                            </Text>
+                          </View>
+                          {!!message.text && (
+                            <Text style={styles.messageText}>{message.text}</Text>
+                          )}
+                          {attachment && (
+                            <Pressable
+                              onPress={() => void openFile(attachment.storagePath)}
+                              style={styles.messageAttachment}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Open ${attachment.name}`}
+                            >
+                              <View style={styles.fileIcon}>
+                                <Text style={styles.fileIconText}>
+                                  {fileExtension(attachment.name)}
+                                </Text>
+                              </View>
+                              <View style={styles.fileDetails}>
+                                <Text style={styles.fileName} numberOfLines={1}>
+                                  {attachment.name}
+                                </Text>
+                                <Text style={styles.fileSize}>
+                                  {formatFileSize(attachment.size) || 'Attached file'}
+                                </Text>
+                              </View>
+                              <Text style={styles.fileCheck}>↗</Text>
+                            </Pressable>
+                          )}
+                        </View>
                       </View>
                     )}
                   </View>
-                </View>
-              ))
+                );
+              })
             )}
           </ScrollView>
 
@@ -523,10 +1120,13 @@ export default function TabTwoScreen() {
               />
               <Pressable
                 onPress={sendMessage}
-                disabled={!messageDraft.trim() && !pendingAttachment}
+                disabled={
+                  isSendingMessage || (!messageDraft.trim() && !pendingAttachment)
+                }
                 style={[
                   styles.sendButton,
-                  !messageDraft.trim() && !pendingAttachment && styles.sendButtonDisabled,
+                  (isSendingMessage || (!messageDraft.trim() && !pendingAttachment)) &&
+                  styles.sendButtonDisabled,
                 ]}
                 accessibilityRole="button"
                 accessibilityLabel="Send message"
@@ -537,6 +1137,207 @@ export default function TabTwoScreen() {
             <Text style={styles.fileHint}>Attach screenshots, PDF, Excel or Word files</Text>
           </View>
         </KeyboardAvoidingView>
+        <Modal
+          visible={isProjectEditOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setIsProjectEditOpen(false)}
+        >
+          <View style={styles.dialogBackdrop}>
+            <View style={styles.dialogCard}>
+              <Text style={styles.dialogTitle}>Edit project details</Text>
+              <FormField label="PROJECT NAME">
+                <TextInput
+                  style={styles.formInput}
+                  value={projectTitleDraft}
+                  onChangeText={setProjectTitleDraft}
+                  maxLength={80}
+                />
+              </FormField>
+              <FormField label="DESCRIPTION">
+                <TextInput
+                  style={[styles.formInput, styles.descriptionInput]}
+                  value={projectDescriptionDraft}
+                  onChangeText={setProjectDescriptionDraft}
+                  multiline
+                  maxLength={500}
+                />
+              </FormField>
+              <FormField label="DEADLINE">
+                <TextInput
+                  style={styles.formInput}
+                  value={projectDeadlineDraft}
+                  onChangeText={setProjectDeadlineDraft}
+                  placeholder="YYYY-MM-DD"
+                  maxLength={10}
+                />
+              </FormField>
+              <FormField label="STATUS">
+                <View style={styles.statusOptions}>
+                  {(['In progress', 'On hold', 'Completed'] as ProjectStatus[]).map(
+                    (status) => (
+                      <Pressable
+                        key={status}
+                        onPress={() => setProjectStatusDraft(status)}
+                        style={[
+                          styles.statusOption,
+                          projectStatusDraft === status && styles.statusOptionActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.statusOptionText,
+                            projectStatusDraft === status && styles.statusOptionTextActive,
+                          ]}
+                        >
+                          {status}
+                        </Text>
+                      </Pressable>
+                    )
+                  )}
+                </View>
+              </FormField>
+              <View style={styles.dialogActions}>
+                <Pressable
+                  onPress={() => setIsProjectEditOpen(false)}
+                  style={styles.cancelButton}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </Pressable>
+                <Pressable onPress={saveProjectDetails} style={styles.submitButton}>
+                  <Text style={styles.submitButtonText}>Save changes</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+        <Modal
+          visible={isTeamCreateOpen}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setIsTeamCreateOpen(false)}
+        >
+          <View style={styles.dialogBackdrop}>
+            <View style={styles.dialogCard}>
+              <Text style={styles.dialogTitle}>Create team</Text>
+              <FormField label="TEAM NAME">
+                <TextInput
+                  style={styles.formInput}
+                  value={teamName}
+                  onChangeText={setTeamName}
+                  placeholder="e.g. Design"
+                  maxLength={60}
+                />
+              </FormField>
+              <Text style={styles.formLabel}>PROJECT MEMBERS</Text>
+              <ScrollView style={styles.memberChoiceList}>
+                {activeProject.members.map((member) => {
+                  const selected = teamMemberIds.includes(member.id);
+                  const leader = teamLeaderIds.includes(member.id);
+                  return (
+                    <View key={member.id} style={styles.teamMemberChoice}>
+                      <Pressable
+                        onPress={() => {
+                          if (selected) {
+                            setTeamMemberIds((current) =>
+                              current.filter((id) => id !== member.id)
+                            );
+                            setTeamLeaderIds((current) =>
+                              current.filter((id) => id !== member.id)
+                            );
+                          } else {
+                            setTeamMemberIds((current) => [...current, member.id]);
+                          }
+                        }}
+                        style={styles.teamMemberSelect}
+                        accessibilityRole="checkbox"
+                        accessibilityState={{ checked: selected }}
+                      >
+                        <Text style={styles.teamMemberCheckbox}>{selected ? '✓' : '○'}</Text>
+                        <Text style={styles.teamMemberChoiceName}>{member.fullName}</Text>
+                      </Pressable>
+                      {selected && (
+                        <Pressable
+                          onPress={() =>
+                            setTeamLeaderIds((current) =>
+                              leader
+                                ? current.filter((id) => id !== member.id)
+                                : [...current, member.id]
+                            )
+                          }
+                          style={styles.leaderToggle}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: leader }}
+                        >
+                          <Text style={[styles.leaderToggleText, leader && styles.leaderActive]}>
+                            {leader ? 'Team Leader' : 'Make Leader'}
+                          </Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+              <View style={styles.dialogActions}>
+                <Pressable
+                  onPress={() => setIsTeamCreateOpen(false)}
+                  style={styles.cancelButton}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </Pressable>
+                <Pressable onPress={createTeam} style={styles.submitButton}>
+                  <Text style={styles.submitButtonText}>Create team</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+        <Modal
+          visible={isTaskModalOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setIsTaskModalOpen(false)}
+        >
+          <View style={styles.dialogBackdrop}>
+            <View style={styles.dialogCard}>
+              <Text style={styles.dialogTitle}>
+                {editingTaskId ? 'Edit team task' : 'Assign team task'}
+              </Text>
+              <FormField label="TASK">
+                <TextInput
+                  style={[styles.formInput, styles.descriptionInput]}
+                  value={taskTitle}
+                  onChangeText={setTaskTitle}
+                  placeholder="Describe the work for this team"
+                  multiline
+                  maxLength={500}
+                />
+              </FormField>
+              <FormField label="DEADLINE">
+                <TextInput
+                  style={styles.formInput}
+                  value={taskDeadline}
+                  onChangeText={setTaskDeadline}
+                  placeholder="YYYY-MM-DD"
+                  maxLength={10}
+                />
+              </FormField>
+              <View style={styles.dialogActions}>
+                <Pressable
+                  onPress={() => setIsTaskModalOpen(false)}
+                  style={styles.cancelButton}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </Pressable>
+                <Pressable onPress={saveTeamTask} style={styles.submitButton}>
+                  <Text style={styles.submitButtonText}>
+                    {editingTaskId ? 'Save task' : 'Assign task'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     );
   }
@@ -558,7 +1359,7 @@ export default function TabTwoScreen() {
           </View>
           <View style={styles.topBarActions}>
             <View style={styles.userAvatar}>
-              <Text style={styles.userAvatarText}>YO</Text>
+              <Text style={styles.userAvatarText}>{initialsFor(currentUserName)}</Text>
             </View>
             <Pressable
               onPress={handleLogout}
@@ -589,6 +1390,55 @@ export default function TabTwoScreen() {
             </Pressable>
           </View>
         </View>
+
+        {invitations.length > 0 && (
+          <View style={styles.inboxSection}>
+            <Text style={styles.sectionTitle}>Project invitations</Text>
+            {invitations.map((invitation) => (
+              <View key={invitation.projectId} style={styles.invitationCard}>
+                <View style={styles.invitationCopy}>
+                  <Text style={styles.invitationTitle}>{invitation.projectTitle}</Text>
+                  <Text style={styles.invitationText}>
+                    {invitation.inviterName} wanted to add you to the Project.
+                  </Text>
+                </View>
+                <View style={styles.invitationActions}>
+                  <Pressable
+                    onPress={() => void respondToInvitation(invitation, true)}
+                    style={styles.acceptButton}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.acceptButtonText}>Accept</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void respondToInvitation(invitation, false)}
+                    style={styles.denyButton}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.denyButtonText}>Deny</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+
+        {notices.length > 0 && (
+          <View style={styles.inboxSection}>
+            <Text style={styles.sectionTitle}>Updates</Text>
+            {notices.map((notice) => (
+              <Pressable
+                key={notice.id}
+                onPress={() => openProject(notice.projectId)}
+                style={styles.noticeCard}
+                accessibilityRole="button"
+              >
+                <Text style={styles.noticeTitle}>{notice.title}</Text>
+                <Text style={styles.noticeText}>{notice.body}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
 
         <View style={styles.statsRow}>
           <View style={[styles.statCard, styles.totalStatCard]}>
@@ -683,7 +1533,11 @@ export default function TabTwoScreen() {
           </ScrollView>
 
           <View style={styles.projectList}>
-            {filteredProjects.length === 0 ? (
+            {isLoadingProjects ? (
+              <View style={styles.emptyProjects}>
+                <Text style={styles.emptyProjectsTitle}>Loading projects…</Text>
+              </View>
+            ) : filteredProjects.length === 0 ? (
               <View style={styles.emptyProjects}>
                 <View style={styles.emptyProjectsMark}>
                   <Text style={styles.emptyProjectsIcon}>⌕</Text>
@@ -708,10 +1562,10 @@ export default function TabTwoScreen() {
                   key={project.id}
                   project={project}
                   index={index}
-                  isJoined={joinedByProject[project.id] !== false}
+                  isAdmin={project.creatorId === currentUserId}
                   isMuted={!!mutedByProject[project.id]}
                   onOpen={() => openProject(project.id)}
-                  onToggleMembership={() => toggleProjectMembership(project.id)}
+                  onLeave={() => confirmLeaveProject(project)}
                   onToggleMute={() => toggleProjectMute(project.id)}
                 />
               ))
@@ -819,42 +1673,24 @@ export default function TabTwoScreen() {
                   )}
                 </View>
               </FormField>
-              <FormField label="ADD TEAM MEMBERS">
-                <View style={styles.addMemberRow}>
-                  <TextInput
-                    style={[styles.formInput, styles.memberInput]}
-                    value={memberInput}
-                    onChangeText={setMemberInput}
-                    placeholder="Name or email"
-                    placeholderTextColor={colors.faint}
-                    onSubmitEditing={addMember}
-                    returnKeyType="done"
-                  />
-                  <Pressable onPress={addMember} style={styles.addMemberButton}>
-                    <Text style={styles.addMemberButtonText}>Add</Text>
-                  </Pressable>
-                </View>
-                {members.length > 0 && (
-                  <View style={styles.memberChips}>
-                    {members.map((member) => (
-                      <View key={member} style={styles.memberChip}>
-                        <Text style={styles.memberChipText}>{member}</Text>
-                        <Pressable
-                          onPress={() =>
-                            setMembers((current) =>
-                              current.filter((value) => value !== member)
-                            )
-                          }
-                          accessibilityRole="button"
-                          accessibilityLabel={`Remove ${member}`}
-                        >
-                          <Text style={styles.memberChipRemove}>×</Text>
-                        </Pressable>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </FormField>
+              <AccountPicker
+                label="INVITE SIGNED-UP USERS"
+                query={memberInput}
+                placeholder="Type a name to search"
+                suggestions={memberSuggestions}
+                selected={selectedUsers}
+                isSearching={isSearchingMembers}
+                onQueryChange={setMemberInput}
+                onSelect={addMember}
+                onRemove={(userId) =>
+                  setSelectedUsers((current) =>
+                    current.filter((user) => user.id !== userId)
+                  )
+                }
+              />
+              <Text style={styles.dateNote}>
+                Only existing signed-up accounts can be invited. Invitations need to be accepted before project access is granted.
+              </Text>
               <Text style={styles.dateNote}>Use YYYY-MM-DD for the project deadline.</Text>
             </ScrollView>
 
@@ -883,18 +1719,18 @@ export default function TabTwoScreen() {
 function ProjectCard({
   project,
   index,
-  isJoined,
+  isAdmin,
   isMuted,
   onOpen,
-  onToggleMembership,
+  onLeave,
   onToggleMute,
 }: {
   project: Project;
   index: number;
-  isJoined: boolean;
+  isAdmin: boolean;
   isMuted: boolean;
   onOpen: () => void;
-  onToggleMembership: () => void;
+  onLeave: () => void;
   onToggleMute: () => void;
 }) {
   return (
@@ -937,17 +1773,20 @@ function ProjectCard({
         </View>
         <View style={styles.projectDetail}>
           <Text style={styles.projectDetailLabel}>CREATED BY</Text>
-          <Text style={styles.projectDetailValue} numberOfLines={1}>
-            {project.creator}
-          </Text>
+          <View style={styles.creatorLine}>
+            <Text style={styles.projectDetailValue} numberOfLines={1}>
+              {project.creatorName}
+            </Text>
+            <Text style={styles.adminLabel}>Admin</Text>
+          </View>
         </View>
         <View style={styles.projectDetail}>
           <Text style={styles.projectDetailLabel}>TEAM</Text>
           <View style={styles.avatarStack}>
             {project.members.slice(0, 3).map((member, memberIndex) => (
               <Avatar
-                key={`${member}-${memberIndex}`}
-                name={member}
+                key={member.id}
+                name={member.fullName}
                 tint={memberIndex % 2 === 0 ? '#EEE9E2' : '#E5EAF2'}
                 small
               />
@@ -965,27 +1804,29 @@ function ProjectCard({
             accessibilityRole="button"
             accessibilityLabel={isMuted ? 'Unmute project' : 'Mute project'}
           >
-            <Text style={[styles.actionIcon, isMuted && styles.actionTextActive]}>
-              {isMuted ? '◖' : '◗'}
-            </Text>
+            <Feather
+              name={isMuted ? 'volume-x' : 'volume-2'}
+              size={20}
+              color={isMuted ? '#000000' : '#666666'}
+            />
             <Text style={[styles.actionText, isMuted && styles.actionTextActive]}>
               {isMuted ? 'Muted' : 'Mute'}
             </Text>
           </Pressable>
-          <View style={styles.actionSeparator} />
-          <Pressable
-            onPress={onToggleMembership}
-            style={styles.actionButton}
-            accessibilityRole="button"
-            accessibilityLabel={isJoined ? 'Leave project' : 'Join project'}
-          >
-            <Text style={[styles.actionIcon, !isJoined && styles.actionTextActive]}>
-              {isJoined ? '↗' : '+'}
-            </Text>
-            <Text style={[styles.actionText, !isJoined && styles.actionTextActive]}>
-              {isJoined ? 'Leave' : 'Join'}
-            </Text>
-          </Pressable>
+          {!isAdmin && (
+            <>
+              <View style={styles.actionSeparator} />
+              <Pressable
+                onPress={onLeave}
+                style={styles.actionButton}
+                accessibilityRole="button"
+                accessibilityLabel="Leave project"
+              >
+                <Text style={styles.actionIcon}>↗</Text>
+                <Text style={styles.actionText}>Leave</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       </View>
     </View>
@@ -2118,5 +2959,285 @@ const styles = StyleSheet.create({
   submitArrow: {
     color: colors.white,
     fontSize: 15,
+  },
+  inboxSection: {
+    marginBottom: 18,
+    gap: 8,
+  },
+  invitationCard: {
+    padding: 13,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    backgroundColor: colors.white,
+  },
+  invitationCopy: {
+    gap: 4,
+  },
+  invitationTitle: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  invitationText: {
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  invitationActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 10,
+  },
+  acceptButton: {
+    minWidth: 75,
+    minHeight: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 7,
+    backgroundColor: colors.black,
+  },
+  acceptButtonText: {
+    color: colors.white,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  denyButton: {
+    minWidth: 75,
+    minHeight: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 7,
+  },
+  denyButtonText: {
+    color: colors.ink,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  noticeCard: {
+    padding: 12,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 9,
+    backgroundColor: colors.white,
+  },
+  noticeTitle: {
+    color: colors.ink,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  noticeText: {
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 4,
+  },
+  creatorLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  adminLabel: {
+    color: '#C45A12',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  editProjectButton: {
+    alignSelf: 'flex-start',
+    marginTop: 10,
+    paddingVertical: 5,
+  },
+  editProjectText: {
+    color: colors.ink,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  memberNames: {
+    gap: 3,
+    marginTop: 8,
+  },
+  memberName: {
+    color: colors.muted,
+    fontSize: 9,
+  },
+  teamsHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 24,
+    paddingBottom: 12,
+  },
+  smallActionButton: {
+    minHeight: 31,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    borderRadius: 7,
+    backgroundColor: colors.black,
+  },
+  smallActionText: {
+    color: colors.white,
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  noTeamsText: {
+    color: colors.muted,
+    fontSize: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 9,
+    backgroundColor: colors.white,
+  },
+  teamCard: {
+    padding: 12,
+    marginBottom: 9,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    backgroundColor: '#FAFAF9',
+  },
+  teamHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  teamHeaderText: {
+    flex: 1,
+  },
+  teamName: {
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  teamMemberNames: {
+    color: colors.muted,
+    fontSize: 9,
+    lineHeight: 14,
+    marginTop: 4,
+  },
+  noTasksText: {
+    color: colors.faint,
+    fontSize: 9,
+    marginTop: 10,
+  },
+  chatTools: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  mediaButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 6,
+  },
+  mediaButtonActive: {
+    borderColor: colors.black,
+    backgroundColor: colors.black,
+  },
+  mediaButtonText: {
+    color: colors.ink,
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  mediaButtonTextActive: {
+    color: colors.white,
+  },
+  messageDateRow: {
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  messageDate: {
+    color: colors.muted,
+    fontSize: 9,
+    fontWeight: '600',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    overflow: 'hidden',
+    borderRadius: 8,
+    backgroundColor: '#ECEDEF',
+  },
+  systemMessage: {
+    alignSelf: 'center',
+    maxWidth: '90%',
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    marginVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#EEECE8',
+  },
+  systemMessageText: {
+    color: '#676767',
+    fontSize: 9,
+    textAlign: 'center',
+    lineHeight: 14,
+  },
+  dialogBackdrop: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+    backgroundColor: 'rgba(0,0,0,0.38)',
+  },
+  dialogCard: {
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '90%',
+    padding: 20,
+    borderRadius: 14,
+    backgroundColor: colors.white,
+  },
+  dialogTitle: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 16,
+  },
+  dialogActions: {
+    flexDirection: 'row',
+    gap: 9,
+    marginTop: 6,
+  },
+  memberChoiceList: {
+    maxHeight: 220,
+    marginBottom: 16,
+  },
+  teamMemberChoice: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  teamMemberSelect: {
+    flex: 1,
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  teamMemberCheckbox: {
+    color: colors.ink,
+    fontSize: 15,
+  },
+  teamMemberChoiceName: {
+    color: colors.ink,
+    fontSize: 10,
+  },
+  leaderToggle: {
+    paddingVertical: 8,
+    paddingHorizontal: 5,
+  },
+  leaderToggleText: {
+    color: colors.muted,
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  leaderActive: {
+    color: '#C45A12',
   },
 });

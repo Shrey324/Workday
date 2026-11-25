@@ -41,6 +41,12 @@ This command will move the starter code to the **example** directory and create 
 - If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
 - Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
 
+## Project collaboration backend
+
+Project membership, invitations, team roles, task permissions, chat messages, notifications, and private shared files use Supabase. Before using these features, apply `supabase/migrations/20261125120000_project_collaboration.sql` to the Supabase project configured by `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. The migration creates the required tables, row-level security policies, notification triggers, realtime publication entries, and the private `project-files` storage bucket.
+
+Only signed-up accounts appear in member search. A project invitation grants project access only after the invitee accepts it.
+
 ## Learn more
 
 To learn more about developing your project with Expo, look at the following resources:
