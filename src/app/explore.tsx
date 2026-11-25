@@ -24,13 +24,21 @@ import {
   createProjectFileUrl,
   createProjectTeam,
   createTeamTask,
+  inviteProjectMembers,
   leaveProject,
+  listMyProjectTasks,
+  listProjectConversationSummaries,
   listProjectInvitations,
+  listProjectMemberIds,
   listProjectMessages,
   listProjectNotices,
   listProjects,
   listProjectTeams,
   listTeamTasks,
+  markProjectConversationRead,
+  markProjectNotificationRead,
+  removeProjectMember,
+  removeProjectTeamMember,
   respondToProjectInvitation,
   searchProjectUsers,
   sendProjectMessage,
@@ -40,7 +48,9 @@ import {
 } from '../features/projects/api';
 import type {
   ChatMessage,
+  MyProjectTask,
   Project,
+  ProjectConversationSummary,
   ProjectInvitation,
   ProjectNotice,
   ProjectStatus,
@@ -50,6 +60,7 @@ import type {
 } from '../features/projects/types';
 
 type FilterStatus = 'All' | ProjectStatus;
+type WorkspaceTab = 'home' | 'projects' | 'tasks' | 'messages';
 
 type Attachment = {
   name: string;
@@ -70,6 +81,7 @@ const colors = {
   greenBg: '#E8F4EE',
   amber: '#A76712',
   amberBg: '#FBF2E3',
+  orange: '#D76A24',
 };
 
 const toDateInputValue = (date: Date) => {
@@ -149,8 +161,36 @@ const formatChatTime = (value: string) =>
     minute: '2-digit',
   });
 
+const daysUntilDeadline = (value: string) => {
+  const deadline = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(deadline.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((deadline.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+};
+
+const isTaskOverdue = (task: MyProjectTask) =>
+  task.status !== 'done' && (daysUntilDeadline(task.deadline) ?? 0) < 0;
+
+const isTaskDueSoon = (task: MyProjectTask) => {
+  const days = daysUntilDeadline(task.deadline);
+  return task.status !== 'done' && days !== null && days >= 0 && days <= 3;
+};
+
+const formatConversationTime = (value: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return formatChatTime(value);
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
+
 export default function TabTwoScreen() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('home');
+  const [myTasks, setMyTasks] = useState<MyProjectTask[]>([]);
+  const [conversations, setConversations] = useState<ProjectConversationSummary[]>([]);
+  const [selectedMyTask, setSelectedMyTask] = useState<MyProjectTask | null>(null);
   const [filter, setFilter] = useState<FilterStatus>('All');
   const [search, setSearch] = useState('');
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -158,7 +198,20 @@ export default function TabTwoScreen() {
   const [mutedByProject, setMutedByProject] = useState<Record<string, boolean>>({});
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState('You');
+  const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [isTaskDetailsOpen, setIsTaskDetailsOpen] = useState(false);
+  const [isMemberListOpen, setIsMemberListOpen] = useState(false);
+  const [isAddMembersOpen, setIsAddMembersOpen] = useState(false);
+  const [addMemberQuery, setAddMemberQuery] = useState('');
+  const [addMemberSuggestions, setAddMemberSuggestions] = useState<UserProfile[]>([]);
+  const [selectedProjectInvitees, setSelectedProjectInvitees] = useState<UserProfile[]>([]);
+  const [projectUserIds, setProjectUserIds] = useState<string[]>([]);
+  const [isSearchingProjectUsers, setIsSearchingProjectUsers] = useState(false);
+  const [isSendingProjectInvites, setIsSendingProjectInvites] = useState(false);
   const [invitations, setInvitations] = useState<ProjectInvitation[]>([]);
   const [notices, setNotices] = useState<ProjectNotice[]>([]);
   const [selectedUsers, setSelectedUsers] = useState<UserProfile[]>([]);
@@ -197,14 +250,18 @@ export default function TabTwoScreen() {
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const isProjectAdmin = !!activeProject && activeProject.creatorId === currentUserId;
   const refreshWorkspace = useCallback(async (userId: string) => {
-    const [nextProjects, nextInvitations, nextNotices] = await Promise.all([
-      listProjects(),
-      listProjectInvitations(userId),
+    const nextProjects = await listProjects();
+    const [nextInvitations, nextNotices, nextTasks, nextConversations] = await Promise.all([
+      listProjectInvitations(),
       listProjectNotices(userId),
+      listMyProjectTasks(userId, nextProjects),
+      listProjectConversationSummaries(),
     ]);
     setProjects(nextProjects);
     setInvitations(nextInvitations);
     setNotices(nextNotices);
+    setMyTasks(nextTasks);
+    setConversations(nextConversations);
   }, []);
 
   useEffect(() => {
@@ -226,6 +283,7 @@ export default function TabTwoScreen() {
       setCurrentUserName(
         data.user.user_metadata?.full_name || data.user.email || 'You'
       );
+      setCurrentUserEmail(data.user.email ?? '');
     };
     void loadUser();
     return () => {
@@ -278,6 +336,34 @@ export default function TabTwoScreen() {
         () => {
           void refreshWorkspace(currentUserId).catch((error) =>
             console.error('Unable to refresh project notifications:', error)
+          );
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'project_chat_messages',
+        },
+        () => {
+          void listProjectConversationSummaries()
+            .then(setConversations)
+            .catch((error) =>
+              console.error('Unable to refresh project messages:', error)
+            );
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'project_team_tasks',
+        },
+        () => {
+          void refreshWorkspace(currentUserId).catch((error) =>
+            console.error('Unable to refresh assigned project tasks:', error)
           );
         }
       )
@@ -421,6 +507,7 @@ export default function TabTwoScreen() {
           }
         })
         .catch((error) => {
+          if (!isMounted) return;
           console.error('Unable to search signed-up users:', error);
           Alert.alert('User search failed', 'Please try searching again.');
         })
@@ -433,6 +520,47 @@ export default function TabTwoScreen() {
       clearTimeout(timer);
     };
   }, [currentUserId, isCreateOpen, memberInput, selectedUsers]);
+
+  useEffect(() => {
+    if (!isAddMembersOpen || !currentUserId || addMemberQuery.trim().length < 2) {
+      setAddMemberSuggestions([]);
+      setIsSearchingProjectUsers(false);
+      return;
+    }
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      setIsSearchingProjectUsers(true);
+      void searchProjectUsers(addMemberQuery, currentUserId)
+        .then((users) => {
+          if (isMounted) {
+            setAddMemberSuggestions(
+              users.filter(
+                (user) =>
+                  !projectUserIds.includes(user.id) &&
+                  !selectedProjectInvitees.some((selected) => selected.id === user.id)
+              )
+            );
+          }
+        })
+        .catch((error) => {
+          console.error('Unable to search signed-up users:', error);
+          Alert.alert('User search failed', 'Please try searching again.');
+        })
+        .finally(() => {
+          if (isMounted) setIsSearchingProjectUsers(false);
+        });
+    }, 250);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [
+    addMemberQuery,
+    currentUserId,
+    isAddMembersOpen,
+    projectUserIds,
+    selectedProjectInvitees,
+  ]);
 
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -450,6 +578,20 @@ export default function TabTwoScreen() {
     (project) => project.status === 'In progress'
   ).length;
   const nearingDeadlineCount = projects.filter(isNearingDeadline).length;
+  const sortedMyTasks = useMemo(
+    () =>
+      [...myTasks].sort(
+        (left, right) =>
+          left.deadline.localeCompare(right.deadline) ||
+          left.title.localeCompare(right.title)
+      ),
+    [myTasks]
+  );
+  const taskInProgressCount = myTasks.filter(
+    (task) => task.status === 'in_progress'
+  ).length;
+  const overdueTaskCount = myTasks.filter(isTaskOverdue).length;
+  const notificationCount = invitations.length + notices.length;
 
   const handleLogout = async () => {
     try {
@@ -623,6 +765,57 @@ export default function TabTwoScreen() {
     }
   };
 
+  const navigateToTab = (tab: WorkspaceTab) => {
+    setActiveProjectId(null);
+    setActiveTab(tab);
+    setIsNotificationsOpen(false);
+    setIsTaskDetailsOpen(false);
+  };
+
+  const openTaskFromNotification = async (notice: ProjectNotice) => {
+    if (!currentUserId || !notice.taskId) return;
+    try {
+      let task = myTasks.find((item) => item.id === notice.taskId);
+      if (!task) {
+        const loadedTasks = await listMyProjectTasks(currentUserId, projects);
+        setMyTasks(loadedTasks);
+        task = loadedTasks.find((item) => item.id === notice.taskId);
+      }
+      if (!task) {
+        throw new Error('This task is no longer assigned to one of your teams.');
+      }
+      await markProjectNotificationRead(notice.id, currentUserId);
+      setNotices((current) => current.filter((item) => item.id !== notice.id));
+      setIsNotificationsOpen(false);
+      setActiveProjectId(null);
+      setActiveTab('tasks');
+      setSelectedMyTask(task);
+      setIsTaskDetailsOpen(true);
+    } catch (error) {
+      console.error('Unable to open the assigned task:', error);
+      Alert.alert(
+        'Unable to open task',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
+  const openProjectNotice = async (notice: ProjectNotice) => {
+    if (!currentUserId) return;
+    try {
+      await markProjectNotificationRead(notice.id, currentUserId);
+      setNotices((current) => current.filter((item) => item.id !== notice.id));
+      setIsNotificationsOpen(false);
+      openProject(notice.projectId);
+    } catch (error) {
+      console.error('Unable to mark the project notification as read:', error);
+      Alert.alert(
+        'Unable to open notification',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
   const toggleProjectMute = (projectId: string) => {
     setMutedByProject((current) => ({
       ...current,
@@ -630,11 +823,183 @@ export default function TabTwoScreen() {
     }));
   };
 
+  const openAddMembersSheet = async () => {
+    if (!activeProject || !isProjectAdmin) return;
+    try {
+      const existingIds = await listProjectMemberIds(activeProject.id);
+      setProjectUserIds(existingIds);
+      setAddMemberQuery('');
+      setSelectedProjectInvitees([]);
+      setIsAddMembersOpen(true);
+    } catch (error) {
+      console.error('Unable to prepare project member search:', error);
+      Alert.alert(
+        'Unable to add members',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+    }
+  };
+
+  const sendProjectInvitations = async () => {
+    if (
+      !activeProject ||
+      !currentUserId ||
+      isSendingProjectInvites ||
+      selectedProjectInvitees.length === 0
+    ) return;
+    const projectId = activeProject.id;
+    const projectTitle = activeProject.title;
+    const inviterId = currentUserId;
+    const inviteeIds = selectedProjectInvitees.map((user) => user.id);
+    let invitationCount: number;
+    setIsSendingProjectInvites(true);
+    try {
+      invitationCount = await inviteProjectMembers(
+        projectId,
+        inviterId,
+        inviteeIds
+      );
+    } catch (error) {
+      console.error('Unable to invite project members:', error);
+      Alert.alert(
+        'Unable to send invitations',
+        error instanceof Error ? error.message : 'Please try again.'
+      );
+      return;
+    } finally {
+      setIsSendingProjectInvites(false);
+    }
+
+    setProjectUserIds((current) => [
+      ...current,
+      ...inviteeIds,
+    ]);
+    setSelectedProjectInvitees([]);
+    setAddMemberQuery('');
+    setIsAddMembersOpen(false);
+    try {
+      await refreshWorkspace(currentUserId);
+    } catch (error) {
+      console.error('Invitations were sent, but the workspace could not refresh:', error);
+      Alert.alert(
+        'Invitations sent',
+        'The invitations were sent, but the project list could not be refreshed. Reopen the project to update it.'
+      );
+      return;
+    }
+    Alert.alert(
+      'Invitations sent',
+      `${invitationCount} user${invitationCount === 1 ? '' : 's'} invited to ${projectTitle}.`
+    );
+  };
+
+  const confirmRemoveProjectMember = (member: UserProfile) => {
+    if (
+      !activeProject ||
+      !isProjectAdmin ||
+      !currentUserId ||
+      member.id === activeProject.creatorId
+    ) return;
+    Alert.alert(
+      'Remove project member?',
+      `Remove ${member.fullName} from ${activeProject.title}? They will lose access to its chat and files.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void removeProjectMember(activeProject.id, member.id)
+              .then(async () => {
+                try {
+                  const [, teams] = await Promise.all([
+                    refreshWorkspace(currentUserId),
+                    listProjectTeams(activeProject.id),
+                  ]);
+                  setTeamsByProject((current) => ({
+                    ...current,
+                    [activeProject.id]: teams,
+                  }));
+                } catch (error) {
+                  console.error(
+                    'Project member was removed, but the workspace could not refresh:',
+                    error
+                  );
+                  Alert.alert(
+                    'Member removed',
+                    'The member was removed, but the project data could not be refreshed. Reopen the project to update it.'
+                  );
+                }
+              })
+              .catch((error) => {
+                console.error('Unable to remove project member:', error);
+                Alert.alert(
+                  'Unable to remove member',
+                  error instanceof Error ? error.message : 'Please try again.'
+                );
+              });
+          },
+        },
+      ]
+    );
+  };
+
+  const confirmRemoveTeamMember = (team: ProjectTeam, member: UserProfile) => {
+    Alert.alert(
+      'Remove team member?',
+      `Remove ${member.fullName} from ${team.name}? They will remain in the project.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void removeProjectTeamMember(team.id, member.id)
+              .then(async () => {
+                if (!activeProject) return;
+                try {
+                  const teams = await listProjectTeams(activeProject.id);
+                  setTeamsByProject((current) => ({
+                    ...current,
+                    [activeProject.id]: teams,
+                  }));
+                } catch (error) {
+                  console.error(
+                    'Team member was removed, but the team could not refresh:',
+                    error
+                  );
+                  Alert.alert(
+                    'Team member removed',
+                    'The member was removed, but the team could not be refreshed. Reopen the project to update it.'
+                  );
+                }
+              })
+              .catch((error) => {
+                console.error('Unable to remove team member:', error);
+                Alert.alert(
+                  'Unable to remove team member',
+                  error instanceof Error ? error.message : 'Please try again.'
+                );
+              });
+          },
+        },
+      ]
+    );
+  };
+
   const openProject = (projectId: string) => {
     setActiveProjectId(projectId);
     setMessageDraft('');
     setPendingAttachment(null);
     setMediaOnly(false);
+    if (currentUserId) {
+      void markProjectConversationRead(projectId, currentUserId)
+        .then(() => listProjectConversationSummaries())
+        .then(setConversations)
+        .catch((error) =>
+          console.error('Unable to mark the project conversation as read:', error)
+        );
+    }
   };
 
   const saveProjectDetails = async () => {
@@ -745,6 +1110,11 @@ export default function TabTwoScreen() {
           item.id === task.id ? { ...item, status } : item
         ),
       }));
+      setMyTasks((current) =>
+        current.map((item) =>
+          item.id === task.id ? { ...item, status } : item
+        )
+      );
     } catch (error) {
       console.error('Unable to update task status:', error);
       Alert.alert(
@@ -805,7 +1175,10 @@ export default function TabTwoScreen() {
       : messages;
     const teams = teamsByProject[activeProject.id] ?? [];
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+      <SafeAreaView
+        style={styles.safeArea}
+        edges={['top', 'left', 'right', 'bottom']}
+      >
         <KeyboardAvoidingView
           style={styles.detailScreen}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -826,6 +1199,16 @@ export default function TabTwoScreen() {
                 {activeProject.title}
               </Text>
             </View>
+            {isProjectAdmin && (
+              <Pressable
+                onPress={() => void openAddMembersSheet()}
+                style={styles.headerIconButton}
+                accessibilityRole="button"
+                accessibilityLabel="Add project members"
+              >
+                <Feather name="plus" size={21} color={colors.ink} />
+              </Pressable>
+            )}
             <Pressable
               onPress={() => toggleProjectMute(activeProject.id)}
               style={styles.headerIconButton}
@@ -878,7 +1261,12 @@ export default function TabTwoScreen() {
                     <Text style={styles.adminLabel}>Admin</Text>
                   </View>
                 </View>
-                <View style={styles.detailMemberMeta}>
+                <Pressable
+                  style={styles.detailMemberMeta}
+                  onPress={() => setIsMemberListOpen(true)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`View ${activeProject.members.length} project members`}
+                >
                   <Text style={styles.metaLabel}>TEAM</Text>
                   <View style={styles.avatarStack}>
                     {activeProject.members.slice(0, 4).map((member, index) => (
@@ -903,7 +1291,7 @@ export default function TabTwoScreen() {
                       </Text>
                     ))}
                   </View>
-                </View>
+                </Pressable>
               </View>
             </View>
 
@@ -946,14 +1334,30 @@ export default function TabTwoScreen() {
                     <View style={styles.teamHeader}>
                       <View style={styles.teamHeaderText}>
                         <Text style={styles.teamName}>{team.name}</Text>
-                        <Text style={styles.teamMemberNames}>
-                          {team.members
-                            .map(
-                              (member) =>
-                                `${member.fullName}${member.teamRole === 'leader' ? ' (Leader)' : ''}`
-                            )
-                            .join(', ') || 'No members'}
-                        </Text>
+                        <View style={styles.teamMemberList}>
+                          {team.members.length ? (
+                            team.members.map((member) => (
+                              <View key={member.id} style={styles.teamMemberRow}>
+                                <Text style={styles.teamMemberNames}>
+                                  {member.fullName}
+                                  {member.teamRole === 'leader' ? ' · Team Leader' : ''}
+                                </Text>
+                                {canManageTeam && member.id !== currentUserId && (
+                                  <Pressable
+                                    onPress={() => confirmRemoveTeamMember(team, member)}
+                                    style={styles.removeTeamMemberButton}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={`Remove ${member.fullName} from ${team.name}`}
+                                  >
+                                    <Feather name="user-x" size={15} color={colors.muted} />
+                                  </Pressable>
+                                )}
+                              </View>
+                            ))
+                          ) : (
+                            <Text style={styles.teamMemberNames}>No members</Text>
+                          )}
+                        </View>
                       </View>
                       {canManageTeam && (
                         <Pressable
@@ -1137,6 +1541,7 @@ export default function TabTwoScreen() {
             <Text style={styles.fileHint}>Attach screenshots, PDF, Excel or Word files</Text>
           </View>
         </KeyboardAvoidingView>
+        <WorkspaceBottomNavigation activeTab={activeTab} onSelect={navigateToTab} />
         <Modal
           visible={isProjectEditOpen}
           transparent
@@ -1338,18 +1743,182 @@ export default function TabTwoScreen() {
             </View>
           </View>
         </Modal>
+        <Modal
+          visible={isMemberListOpen}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setIsMemberListOpen(false)}
+        >
+          <View style={styles.sheetBackdrop}>
+            <Pressable
+              style={styles.sheetDismissArea}
+              onPress={() => setIsMemberListOpen(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close member list"
+            />
+            <View style={styles.bottomSheet}>
+              <View style={styles.sheetHandle} />
+              <View style={styles.sheetHeading}>
+                <View>
+                  <Text style={styles.dialogTitle}>Project members</Text>
+                  <Text style={styles.chatSubtitle}>
+                    Roles and access for {activeProject.title}.
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => setIsMemberListOpen(false)}
+                  style={styles.sheetCloseButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close member list"
+                >
+                  <Feather name="x" size={18} color={colors.ink} />
+                </Pressable>
+              </View>
+              <ScrollView style={styles.sheetMemberList}>
+                {activeProject.members.map((member) => {
+                  const leaderTeams = teams
+                    .filter((team) =>
+                      team.members.some(
+                        (teamMember) =>
+                          teamMember.id === member.id &&
+                          teamMember.teamRole === 'leader'
+                      )
+                    )
+                    .map((team) => team.name);
+                  const roleLabel =
+                    member.role === 'admin'
+                      ? 'Admin'
+                      : leaderTeams.length
+                        ? `Team Leader · ${leaderTeams.join(', ')}`
+                        : 'Member';
+                  return (
+                    <View key={member.id} style={styles.memberListRow}>
+                      <Avatar
+                        name={member.fullName}
+                        tint="#EEE9E2"
+                        small
+                      />
+                      <View style={styles.memberListCopy}>
+                        <Text style={styles.memberListName}>{member.fullName}</Text>
+                        <Text
+                          style={[
+                            styles.memberListRole,
+                            member.role === 'admin' && styles.adminLabel,
+                          ]}
+                        >
+                          {roleLabel}
+                        </Text>
+                      </View>
+                      {isProjectAdmin &&
+                        member.role !== 'admin' &&
+                        member.id !== currentUserId && (
+                          <Pressable
+                            onPress={() => confirmRemoveProjectMember(member)}
+                            style={styles.removeMemberButton}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Remove ${member.fullName} from project`}
+                          >
+                            <Feather name="user-x" size={17} color={colors.muted} />
+                          </Pressable>
+                        )}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+        <Modal
+          visible={isAddMembersOpen}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setIsAddMembersOpen(false)}
+        >
+          <View style={styles.sheetBackdrop}>
+            <Pressable
+              style={styles.sheetDismissArea}
+              onPress={() => setIsAddMembersOpen(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close add members sheet"
+            />
+            <View style={styles.bottomSheet}>
+              <View style={styles.sheetHandle} />
+              <View style={styles.sheetHeading}>
+                <View>
+                  <Text style={styles.dialogTitle}>Add project members</Text>
+                  <Text style={styles.chatSubtitle}>
+                    Invitations are sent to signed-up accounts.
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => setIsAddMembersOpen(false)}
+                  style={styles.sheetCloseButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close add members sheet"
+                >
+                  <Feather name="x" size={18} color={colors.ink} />
+                </Pressable>
+              </View>
+              <ScrollView
+                style={styles.addMembersPicker}
+                keyboardShouldPersistTaps="handled"
+              >
+                <AccountPicker
+                  label="SEARCH ACCOUNTS"
+                  query={addMemberQuery}
+                  placeholder="Type a name to search"
+                  suggestions={addMemberSuggestions}
+                  selected={selectedProjectInvitees}
+                  isSearching={isSearchingProjectUsers}
+                  onQueryChange={setAddMemberQuery}
+                  onSelect={(user) => {
+                    setSelectedProjectInvitees((current) =>
+                      current.some((selected) => selected.id === user.id)
+                        ? current
+                        : [...current, user]
+                    );
+                    setAddMemberQuery('');
+                  }}
+                  onRemove={(userId) =>
+                    setSelectedProjectInvitees((current) =>
+                      current.filter((user) => user.id !== userId)
+                    )
+                  }
+                />
+              </ScrollView>
+              <View style={styles.dialogActions}>
+                <Pressable
+                  onPress={() => setIsAddMembersOpen(false)}
+                  style={styles.cancelButton}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void sendProjectInvitations()}
+                  disabled={
+                    isSendingProjectInvites || selectedProjectInvitees.length === 0
+                  }
+                  style={[
+                    styles.submitButton,
+                    (isSendingProjectInvites || selectedProjectInvitees.length === 0) &&
+                      styles.submitButtonDisabled,
+                  ]}
+                >
+                  <Text style={styles.submitButtonText}>
+                    {isSendingProjectInvites ? 'Sending…' : 'Send invitations'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      <ScrollView
-        style={styles.dashboard}
-        contentContainerStyle={styles.dashboardContent}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
+    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right', 'bottom']}>
+      <View style={styles.topBarContainer}>
         <View style={styles.topBar}>
           <View style={styles.brandLockup}>
             <View style={styles.brandMark}>
@@ -1358,19 +1927,68 @@ export default function TabTwoScreen() {
             <Text style={styles.brandName}>workroom</Text>
           </View>
           <View style={styles.topBarActions}>
-            <View style={styles.userAvatar}>
-              <Text style={styles.userAvatarText}>{initialsFor(currentUserName)}</Text>
-            </View>
             <Pressable
-              onPress={handleLogout}
-              style={styles.logoutButton}
+              onPress={() => setIsNotificationsOpen(true)}
+              style={styles.notificationButton}
               accessibilityRole="button"
+              accessibilityLabel={`${notificationCount} notifications`}
             >
-              <Text style={styles.logoutText}>Log out</Text>
+              <Feather name="bell" size={19} color={colors.ink} />
+              {notificationCount > 0 && (
+                <View style={styles.notificationBadge}>
+                  <Text style={styles.notificationBadgeText}>
+                    {notificationCount > 99 ? '99+' : notificationCount}
+                  </Text>
+                </View>
+              )}
             </Pressable>
+            <View style={styles.profileMenuAnchor}>
+              <Pressable
+                onPress={() => setIsProfileMenuOpen((open) => !open)}
+                style={styles.profileIconButton}
+                accessibilityRole="button"
+                accessibilityLabel="Open profile menu"
+                accessibilityState={{ expanded: isProfileMenuOpen }}
+              >
+                <Feather name="user" size={19} color={colors.ink} />
+              </Pressable>
+              {isProfileMenuOpen && (
+                <View style={styles.profileDropdown}>
+                  <Pressable
+                    onPress={() => {
+                      setIsProfileMenuOpen(false);
+                      setIsProfileModalOpen(true);
+                    }}
+                    style={styles.profileMenuItem}
+                    accessibilityRole="button"
+                  >
+                    <Feather name="user" size={15} color={colors.ink} />
+                    <Text style={styles.profileMenuText}>Profile</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setIsProfileMenuOpen(false);
+                      void handleLogout();
+                    }}
+                    style={styles.profileMenuItem}
+                    accessibilityRole="button"
+                  >
+                    <Feather name="log-out" size={15} color={colors.ink} />
+                    <Text style={styles.profileMenuText}>Log out</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
           </View>
         </View>
-
+      </View>
+      <ScrollView
+        style={styles.dashboard}
+        contentContainerStyle={styles.dashboardContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {activeTab === 'home' && <>
         <View style={styles.welcomeBlock}>
           <Text style={styles.welcomeEyebrow}>YOUR WORKSPACE</Text>
           <View style={styles.welcomeTitleRow}>
@@ -1429,7 +2047,11 @@ export default function TabTwoScreen() {
             {notices.map((notice) => (
               <Pressable
                 key={notice.id}
-                onPress={() => openProject(notice.projectId)}
+                onPress={() =>
+                  notice.type === 'team_task_assigned'
+                    ? void openTaskFromNotification(notice)
+                    : void openProjectNotice(notice)
+                }
                 style={styles.noticeCard}
                 accessibilityRole="button"
               >
@@ -1469,13 +2091,19 @@ export default function TabTwoScreen() {
             </View>
           </View>
         </View>
+        </>}
 
+        {(activeTab === 'home' || activeTab === 'projects') && (
         <View style={styles.projectsSection}>
           <View style={styles.sectionHeading}>
             <View>
-              <Text style={styles.sectionTitle}>Projects</Text>
+              <Text style={styles.sectionTitle}>
+                {activeTab === 'projects' ? 'All projects' : 'Projects'}
+              </Text>
               <Text style={styles.sectionSubtitle}>
-                Keep every moving piece in view.
+                {activeTab === 'projects'
+                  ? 'Browse and manage your project workspace.'
+                  : 'Keep every moving piece in view.'}
               </Text>
             </View>
             <Text style={styles.projectCount}>
@@ -1572,9 +2200,165 @@ export default function TabTwoScreen() {
             )}
           </View>
         </View>
+        )}
 
-        <Text style={styles.footerText}>A little more focus. A lot more momentum.</Text>
+        {activeTab === 'tasks' && (
+          <View style={styles.workspaceSection}>
+            <View style={styles.sectionHeading}>
+              <View>
+                <Text style={styles.sectionTitle}>My tasks</Text>
+                <Text style={styles.sectionSubtitle}>
+                  Work assigned to your teams across every project.
+                </Text>
+              </View>
+            </View>
+            <View style={styles.taskKpiRow}>
+              <View style={styles.taskKpiCard}>
+                <Text style={styles.taskKpiLabel}>TOTAL TASKS</Text>
+                <Text style={styles.taskKpiValue}>{myTasks.length}</Text>
+              </View>
+              <View style={styles.taskKpiCard}>
+                <Text style={styles.taskKpiLabel}>IN PROGRESS</Text>
+                <Text style={styles.taskKpiValue}>{taskInProgressCount}</Text>
+              </View>
+              <View style={[styles.taskKpiCard, styles.overdueKpiCard]}>
+                <Text style={styles.taskKpiLabel}>OVERDUE</Text>
+                <Text style={[styles.taskKpiValue, styles.overdueKpiValue]}>
+                  {overdueTaskCount}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.myTaskList}>
+              {isLoadingProjects ? (
+                <View style={styles.emptyProjects}>
+                  <Text style={styles.emptyProjectsTitle}>Loading tasks…</Text>
+                </View>
+              ) : sortedMyTasks.length === 0 ? (
+                <View style={styles.emptyProjects}>
+                  <Text style={styles.emptyProjectsTitle}>No tasks assigned yet</Text>
+                  <Text style={styles.emptyProjectsText}>
+                    Tasks assigned to your project teams will appear here.
+                  </Text>
+                </View>
+              ) : (
+                sortedMyTasks.map((task) => (
+                  <Pressable
+                    key={task.id}
+                    onPress={() => {
+                      setSelectedMyTask(task);
+                      setIsTaskDetailsOpen(true);
+                    }}
+                    style={styles.myTaskCard}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open task ${task.title}`}
+                  >
+                    <View style={styles.myTaskCardTop}>
+                      <Text style={styles.myTaskTitle} numberOfLines={2}>
+                        {task.title}
+                      </Text>
+                      {isTaskDueSoon(task) && (
+                        <Text style={styles.priorityTag}>Priority</Text>
+                      )}
+                    </View>
+                    <Text style={styles.myTaskProject} numberOfLines={1}>
+                      {task.projectName} · {task.teamName}
+                    </Text>
+                    <View style={styles.myTaskCardBottom}>
+                      <Text
+                        style={[
+                          styles.myTaskDue,
+                          isTaskOverdue(task) && styles.myTaskOverdue,
+                        ]}
+                      >
+                        Due {formatDeadline(task.deadline)}
+                      </Text>
+                      <Text style={styles.myTaskStatus}>
+                        {task.status === 'done'
+                          ? 'Done'
+                          : task.status === 'needs_more_time'
+                            ? 'Needs more time'
+                            : 'In progress'}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))
+              )}
+            </View>
+          </View>
+        )}
+
+        {activeTab === 'messages' && (
+          <View style={styles.workspaceSection}>
+            <View style={styles.sectionHeading}>
+              <View>
+                <Text style={styles.sectionTitle}>Messages</Text>
+                <Text style={styles.sectionSubtitle}>
+                  Latest updates from your project chats.
+                </Text>
+              </View>
+            </View>
+            {isLoadingProjects ? (
+              <View style={styles.emptyProjects}>
+                <Text style={styles.emptyProjectsTitle}>Loading messages…</Text>
+              </View>
+            ) : conversations.length === 0 ? (
+              <View style={styles.emptyProjects}>
+                <Text style={styles.emptyProjectsTitle}>No project chats yet</Text>
+                <Text style={styles.emptyProjectsText}>
+                  Join a project to see its messages here.
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.conversationList}>
+                {conversations.map((conversation) => (
+                  <Pressable
+                    key={conversation.projectId}
+                    onPress={() => openProject(conversation.projectId)}
+                    style={styles.conversationCard}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open messages for ${conversation.projectTitle}`}
+                  >
+                    <View style={styles.conversationCopy}>
+                      <Text style={styles.conversationPreview} numberOfLines={1}>
+                        <Text style={styles.conversationProjectName}>
+                          {conversation.projectTitle}
+                        </Text>
+                        {' · '}
+                        {conversation.latestAuthorName
+                          ? `${conversation.latestAuthorName}: `
+                          : ''}
+                        {conversation.latestMessage || 'No messages yet'}
+                      </Text>
+                    </View>
+                    <View style={styles.conversationMeta}>
+                      <Text style={styles.conversationTime}>
+                        {formatConversationTime(conversation.latestMessageAt)}
+                      </Text>
+                      {conversation.unreadCount > 0 && (
+                        <View style={styles.unreadCountBadge}>
+                          <Text style={styles.unreadCountText}>
+                            {conversation.unreadCount > 99
+                              ? '99+'
+                              : conversation.unreadCount}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+
+        {activeTab === 'home' && (
+          <Text style={styles.footerText}>
+            A little more focus. A lot more momentum.
+          </Text>
+        )}
       </ScrollView>
+
+      <WorkspaceBottomNavigation activeTab={activeTab} onSelect={navigateToTab} />
 
       <Modal
         visible={isCreateOpen}
@@ -1712,7 +2496,244 @@ export default function TabTwoScreen() {
           </KeyboardAvoidingView>
         </SafeAreaView>
       </Modal>
+      <Modal
+        visible={isNotificationsOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setIsNotificationsOpen(false)}
+      >
+        <View style={styles.sheetBackdrop}>
+          <Pressable
+            style={styles.sheetDismissArea}
+            onPress={() => setIsNotificationsOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close notifications"
+          />
+          <View style={styles.bottomSheet}>
+            <View style={styles.sheetHandle} />
+            <View style={styles.sheetHeading}>
+              <View>
+                <Text style={styles.dialogTitle}>Notifications</Text>
+                <Text style={styles.chatSubtitle}>
+                  Invitations and project updates.
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => setIsNotificationsOpen(false)}
+                style={styles.sheetCloseButton}
+                accessibilityRole="button"
+                accessibilityLabel="Close notifications"
+              >
+                <Feather name="x" size={18} color={colors.ink} />
+              </Pressable>
+            </View>
+            <ScrollView style={styles.notificationList}>
+              {invitations.map((invitation) => (
+                <View key={invitation.projectId} style={styles.notificationCard}>
+                  <Text style={styles.notificationTitle}>{invitation.projectTitle}</Text>
+                  <Text style={styles.notificationBody}>
+                    {invitation.inviterName} wanted to add you to the project.
+                  </Text>
+                  <View style={styles.invitationActions}>
+                    <Pressable
+                      onPress={() => void respondToInvitation(invitation, true)}
+                      style={styles.acceptButton}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.acceptButtonText}>Accept</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => void respondToInvitation(invitation, false)}
+                      style={styles.denyButton}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.denyButtonText}>Deny</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
+              {notices.map((notice) => (
+                <Pressable
+                  key={notice.id}
+                  onPress={() =>
+                    notice.type === 'team_task_assigned'
+                      ? void openTaskFromNotification(notice)
+                      : void openProjectNotice(notice)
+                  }
+                  style={styles.notificationCard}
+                  accessibilityRole="button"
+                >
+                  <View style={styles.notificationCardHeading}>
+                    <Text style={styles.notificationTitle}>{notice.title}</Text>
+                    <Text style={styles.notificationTime}>
+                      {formatConversationTime(notice.createdAt)}
+                    </Text>
+                  </View>
+                  <Text style={styles.notificationBody}>{notice.body}</Text>
+                  <Text style={styles.notificationAction}>
+                    {notice.type === 'team_task_assigned' ? 'Tap to view task' : 'Tap to view project'}
+                  </Text>
+                </Pressable>
+              ))}
+              {notificationCount === 0 && (
+                <View style={styles.emptyProjects}>
+                  <Text style={styles.emptyProjectsTitle}>You’re all caught up</Text>
+                  <Text style={styles.emptyProjectsText}>
+                    New project invitations and task updates will appear here.
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={isTaskDetailsOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsTaskDetailsOpen(false)}
+      >
+        <View style={styles.dialogBackdrop}>
+          <View style={styles.dialogCard}>
+            <View style={styles.taskDetailsHeading}>
+              <Text style={styles.dialogTitle}>Task details</Text>
+              <Pressable
+                onPress={() => setIsTaskDetailsOpen(false)}
+                style={styles.sheetCloseButton}
+                accessibilityRole="button"
+                accessibilityLabel="Close task details"
+              >
+                <Feather name="x" size={18} color={colors.ink} />
+              </Pressable>
+            </View>
+            {selectedMyTask && (
+              <>
+                <Text style={styles.taskDetailsTitle}>{selectedMyTask.title}</Text>
+                <Text style={styles.taskDetailsProject}>
+                  {selectedMyTask.projectName} · {selectedMyTask.teamName}
+                </Text>
+                <View style={styles.taskDetailsMeta}>
+                  <Text style={styles.taskDetailsLabel}>DUE DATE</Text>
+                  <Text
+                    style={[
+                      styles.taskDetailsValue,
+                      isTaskOverdue(selectedMyTask) && styles.myTaskOverdue,
+                    ]}
+                  >
+                    {formatDeadline(selectedMyTask.deadline)}
+                  </Text>
+                </View>
+                <View style={styles.taskDetailsMeta}>
+                  <Text style={styles.taskDetailsLabel}>STATUS</Text>
+                  <Text style={styles.taskDetailsValue}>
+                    {selectedMyTask.status === 'done'
+                      ? 'Done'
+                      : selectedMyTask.status === 'needs_more_time'
+                        ? 'Needs more time'
+                        : 'In progress'}
+                  </Text>
+                </View>
+                {isTaskDueSoon(selectedMyTask) && (
+                  <Text style={[styles.priorityTag, styles.taskDetailsPriority]}>
+                    Priority · due within 3 days
+                  </Text>
+                )}
+              </>
+            )}
+            <View style={styles.dialogActions}>
+              <Pressable
+                onPress={() => setIsTaskDetailsOpen(false)}
+                style={styles.submitButton}
+              >
+                <Text style={styles.submitButtonText}>Done</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={isProfileModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsProfileModalOpen(false)}
+      >
+        <View style={styles.profileModalBackdrop}>
+          <Pressable
+            style={styles.profileModalDismiss}
+            onPress={() => setIsProfileModalOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close profile"
+          />
+          <View style={styles.profileCard}>
+            <View style={styles.profileCardHeader}>
+              <Text style={styles.dialogTitle}>Profile</Text>
+              <Pressable
+                onPress={() => setIsProfileModalOpen(false)}
+                style={styles.sheetCloseButton}
+                accessibilityRole="button"
+                accessibilityLabel="Close profile"
+              >
+                <Feather name="x" size={18} color={colors.ink} />
+              </Pressable>
+            </View>
+            <View style={styles.profileDetails}>
+              <View style={styles.profileAvatar}>
+                <Feather name="user" size={23} color={colors.ink} />
+              </View>
+              <Text style={styles.profileName}>{currentUserName}</Text>
+              <Text style={styles.profileEmail}>{currentUserEmail}</Text>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
+  );
+}
+
+function WorkspaceBottomNavigation({
+  activeTab,
+  onSelect,
+}: {
+  activeTab: WorkspaceTab;
+  onSelect: (tab: WorkspaceTab) => void;
+}) {
+  const items: { tab: WorkspaceTab; label: string; icon: 'home' | 'folder' | 'check-square' | 'message-circle' }[] = [
+    { tab: 'home', label: 'Home', icon: 'home' },
+    { tab: 'projects', label: 'Projects', icon: 'folder' },
+    { tab: 'tasks', label: 'My Tasks', icon: 'check-square' },
+    { tab: 'messages', label: 'Messages', icon: 'message-circle' },
+  ];
+
+  return (
+    <View style={styles.bottomNavigation}>
+      {items.map((item) => {
+        const isActive = activeTab === item.tab;
+        return (
+          <Pressable
+            key={item.tab}
+            onPress={() => onSelect(item.tab)}
+            style={styles.bottomNavigationItem}
+            accessibilityRole="button"
+            accessibilityLabel={item.label}
+            accessibilityState={{ selected: isActive }}
+          >
+            <Feather
+              name={item.icon}
+              size={19}
+              color={isActive ? colors.orange : colors.muted}
+            />
+            <Text
+              style={[
+                styles.bottomNavigationLabel,
+                isActive && styles.bottomNavigationLabelActive,
+              ]}
+            >
+              {item.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
   );
 }
 
@@ -1804,6 +2825,9 @@ function ProjectCard({
             accessibilityRole="button"
             accessibilityLabel={isMuted ? 'Unmute project' : 'Mute project'}
           >
+            {/* <Text style={[styles.actionIcon, isMuted && styles.actionTextActive]}>
+              {isMuted ? 'volume-x' : 'volume-2'}
+            </Text> */}
             <Feather
               name={isMuted ? 'volume-x' : 'volume-2'}
               size={20}
@@ -1915,6 +2939,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingBottom: 36,
   },
+  topBarContainer: {
+    width: '100%',
+    maxWidth: 1020,
+    alignSelf: 'center',
+    zIndex: 10,
+    elevation: 10,
+    paddingHorizontal: 24,
+    backgroundColor: colors.white,
+  },
   topBar: {
     height: 72,
     flexDirection: 'row',
@@ -1922,6 +2955,29 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     borderBottomWidth: 1,
     borderBottomColor: colors.line,
+  },
+  bottomNavigation: {
+    height: 63,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    backgroundColor: colors.white,
+  },
+  bottomNavigationItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  bottomNavigationLabel: {
+    color: colors.muted,
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  bottomNavigationLabelActive: {
+    color: colors.orange,
   },
   brandLockup: {
     flexDirection: 'row',
@@ -1954,27 +3010,70 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 13,
   },
-  userAvatar: {
-    width: 33,
-    height: 33,
-    borderRadius: 17,
+  notificationButton: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 18,
+    backgroundColor: '#F3F3F2',
+  },
+  notificationBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -5,
+    minWidth: 17,
+    height: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    backgroundColor: colors.orange,
+  },
+  notificationBadgeText: {
+    color: colors.white,
+    fontSize: 8,
+    fontWeight: '700',
+  },
+  profileMenuAnchor: {
+    position: 'relative',
+    zIndex: 5,
+  },
+  profileIconButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#E8E5E0',
   },
-  userAvatarText: {
+  profileDropdown: {
+    position: 'absolute',
+    top: 43,
+    right: 0,
+    width: 146,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 9,
+    backgroundColor: colors.white,
+    shadowColor: '#000000',
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  profileMenuItem: {
+    minHeight: 39,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    paddingHorizontal: 12,
+  },
+  profileMenuText: {
     color: colors.ink,
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  logoutButton: {
-    paddingVertical: 8,
-    paddingLeft: 2,
-  },
-  logoutText: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 11,
+    fontWeight: '500',
   },
   welcomeBlock: {
     paddingTop: 33,
@@ -2019,6 +3118,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: 9,
     backgroundColor: colors.black,
+  },
+  submitButtonDisabled: {
+    backgroundColor: '#A8A9AB',
   },
   createButtonPlus: {
     color: colors.white,
@@ -2120,6 +3222,150 @@ const styles = StyleSheet.create({
   },
   projectsSection: {
     paddingTop: 34,
+  },
+  workspaceSection: {
+    paddingTop: 28,
+    paddingBottom: 8,
+  },
+  taskKpiRow: {
+    flexDirection: 'row',
+    gap: 9,
+    marginBottom: 18,
+  },
+  taskKpiCard: {
+    flex: 1,
+    minHeight: 83,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    backgroundColor: colors.white,
+  },
+  overdueKpiCard: {
+    borderColor: '#F1D5C5',
+    backgroundColor: '#FFF8F3',
+  },
+  taskKpiLabel: {
+    color: colors.muted,
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  taskKpiValue: {
+    color: colors.ink,
+    fontSize: 24,
+    fontWeight: '700',
+    marginTop: 5,
+  },
+  overdueKpiValue: {
+    color: colors.orange,
+  },
+  myTaskList: {
+    gap: 9,
+  },
+  myTaskCard: {
+    padding: 14,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    backgroundColor: colors.white,
+  },
+  myTaskCardTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  myTaskTitle: {
+    flex: 1,
+    color: colors.ink,
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  priorityTag: {
+    overflow: 'hidden',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#FFF0E6',
+    color: colors.orange,
+    fontSize: 8,
+    fontWeight: '700',
+  },
+  myTaskProject: {
+    color: colors.muted,
+    fontSize: 9,
+    marginTop: 6,
+  },
+  myTaskCardBottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 11,
+  },
+  myTaskDue: {
+    color: colors.muted,
+    fontSize: 9,
+  },
+  myTaskOverdue: {
+    color: '#B54724',
+    fontWeight: '700',
+  },
+  myTaskStatus: {
+    color: colors.muted,
+    fontSize: 9,
+    fontWeight: '600',
+  },
+  conversationList: {
+    gap: 8,
+  },
+  conversationCard: {
+    minHeight: 62,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 10,
+    backgroundColor: colors.white,
+  },
+  conversationCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  conversationPreview: {
+    color: colors.muted,
+    fontSize: 10,
+  },
+  conversationProjectName: {
+    color: colors.ink,
+    fontWeight: '700',
+  },
+  conversationMeta: {
+    alignItems: 'flex-end',
+    gap: 5,
+  },
+  conversationTime: {
+    color: colors.faint,
+    fontSize: 8,
+  },
+  unreadCountBadge: {
+    minWidth: 19,
+    height: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+    borderRadius: 10,
+    backgroundColor: colors.orange,
+  },
+  unreadCountText: {
+    color: colors.white,
+    fontSize: 8,
+    fontWeight: '700',
   },
   sectionHeading: {
     flexDirection: 'row',
@@ -2257,7 +3503,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   projectDetail: {
-    flex: 1,
+    // flex: 1,
     minWidth: 0,
   },
   projectDetailLabel: {
@@ -3117,6 +4363,22 @@ const styles = StyleSheet.create({
     lineHeight: 14,
     marginTop: 4,
   },
+  teamMemberList: {
+    marginTop: 4,
+  },
+  teamMemberRow: {
+    minHeight: 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  removeTeamMemberButton: {
+    width: 30,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   noTasksText: {
     color: colors.faint,
     fontSize: 9,
@@ -3180,6 +4442,211 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 20,
     backgroundColor: 'rgba(0,0,0,0.38)',
+  },
+  sheetBackdrop: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.38)',
+  },
+  sheetDismissArea: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  bottomSheet: {
+    maxHeight: '82%',
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 24,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    backgroundColor: colors.white,
+  },
+  sheetHandle: {
+    width: 38,
+    height: 4,
+    alignSelf: 'center',
+    marginBottom: 14,
+    borderRadius: 2,
+    backgroundColor: '#D5D5D2',
+  },
+  sheetHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  sheetCloseButton: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    backgroundColor: '#F3F3F2',
+  },
+  notificationList: {
+    maxHeight: 470,
+  },
+  notificationCard: {
+    padding: 13,
+    marginBottom: 9,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 9,
+    backgroundColor: colors.white,
+  },
+  notificationCardHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  notificationTitle: {
+    color: colors.ink,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  notificationBody: {
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 5,
+  },
+  notificationTime: {
+    color: colors.faint,
+    fontSize: 8,
+  },
+  notificationAction: {
+    color: colors.orange,
+    fontSize: 9,
+    fontWeight: '700',
+    marginTop: 8,
+  },
+  taskDetailsHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  taskDetailsTitle: {
+    color: colors.ink,
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 22,
+    marginTop: 8,
+  },
+  taskDetailsProject: {
+    color: colors.muted,
+    fontSize: 10,
+    marginTop: 5,
+  },
+  taskDetailsMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 11,
+    marginTop: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  taskDetailsLabel: {
+    color: colors.faint,
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  taskDetailsValue: {
+    color: colors.ink,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  taskDetailsPriority: {
+    alignSelf: 'flex-start',
+    marginTop: 13,
+  },
+  sheetMemberList: {
+    maxHeight: 410,
+  },
+  memberListRow: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  memberListCopy: {
+    flex: 1,
+  },
+  memberListName: {
+    color: colors.ink,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  memberListRole: {
+    color: colors.muted,
+    fontSize: 9,
+    marginTop: 3,
+  },
+  removeMemberButton: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addMembersPicker: {
+    maxHeight: 350,
+    marginBottom: 13,
+  },
+  profileModalBackdrop: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+    backgroundColor: 'rgba(0,0,0,0.38)',
+  },
+  profileModalDismiss: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  profileCard: {
+    width: '100%',
+    maxWidth: 380,
+    padding: 20,
+    borderRadius: 14,
+    backgroundColor: colors.white,
+  },
+  profileCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  profileDetails: {
+    alignItems: 'center',
+    paddingVertical: 18,
+  },
+  profileAvatar: {
+    width: 54,
+    height: 54,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 11,
+    borderRadius: 27,
+    backgroundColor: '#E8E5E0',
+  },
+  profileName: {
+    color: colors.ink,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  profileEmail: {
+    color: colors.muted,
+    fontSize: 10,
+    marginTop: 5,
   },
   dialogCard: {
     width: '100%',

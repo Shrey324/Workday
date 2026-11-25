@@ -2,7 +2,9 @@ import { supabase } from '../../../lib/supabase';
 import type {
   ChatAttachment,
   ChatMessage,
+  MyProjectTask,
   Project,
+  ProjectConversationSummary,
   ProjectInvitation,
   ProjectNotice,
   ProjectTeam,
@@ -12,6 +14,19 @@ import type {
 } from './types';
 
 type ProfileRow = { id: string; full_name: string };
+type PendingInvitationRow = {
+  project_id: string;
+  project_title: string;
+  inviter_name: string;
+};
+type ProjectConversationRow = {
+  project_id: string;
+  project_title: string;
+  latest_message: string | null;
+  latest_message_at: string | null;
+  latest_author_name: string | null;
+  unread_count: number | string | null;
+};
 
 const profileName = (profile?: ProfileRow) => profile?.full_name || 'Unknown member';
 
@@ -37,6 +52,49 @@ export async function searchProjectUsers(query: string, currentUserId: string) {
   return (data ?? []).map(
     (profile): UserProfile => ({ id: profile.id, fullName: profile.full_name })
   );
+}
+
+export async function listProjectMemberIds(projectId: string) {
+  const { data, error } = await supabase
+    .from('project_members')
+    .select('user_id')
+    .eq('project_id', projectId);
+  if (error) throw error;
+  return (data ?? []).map((member) => member.user_id);
+}
+
+export async function inviteProjectMembers(
+  projectId: string,
+  inviterId: string,
+  inviteeIds: string[]
+) {
+  const uniqueIds = [...new Set(inviteeIds)].filter((id) => id !== inviterId);
+  if (uniqueIds.length === 0) throw new Error('Select at least one user to invite.');
+
+  const { data: existingMembers, error: existingError } = await supabase
+    .from('project_members')
+    .select('user_id')
+    .eq('project_id', projectId)
+    .in('user_id', uniqueIds);
+  if (existingError) throw existingError;
+
+  const existingIds = new Set((existingMembers ?? []).map((member) => member.user_id));
+  const newInviteeIds = uniqueIds.filter((id) => !existingIds.has(id));
+  if (newInviteeIds.length === 0) {
+    throw new Error('Those users are already members or have a pending invitation.');
+  }
+
+  const { error } = await supabase.from('project_members').insert(
+    newInviteeIds.map((userId) => ({
+      project_id: projectId,
+      user_id: userId,
+      invited_by: inviterId,
+      role: 'member',
+      status: 'pending',
+    }))
+  );
+  if (error) throw error;
+  return newInviteeIds.length;
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -82,49 +140,76 @@ export async function listProjects(): Promise<Project[]> {
   }));
 }
 
-export async function listProjectInvitations(
-  userId: string
-): Promise<ProjectInvitation[]> {
-  const { data: memberRows, error } = await supabase
-    .from('project_members')
-    .select('project_id, invited_by')
-    .eq('user_id', userId)
-    .eq('status', 'pending');
+export async function listProjectInvitations(): Promise<ProjectInvitation[]> {
+  const { data, error } = await supabase.rpc('list_pending_project_invitations');
   if (error) throw error;
-  if (!memberRows?.length) return [];
-
-  const projectIds = [...new Set(memberRows.map((member) => member.project_id))];
-  const inviterIds = [...new Set(memberRows.map((member) => member.invited_by))];
-  const [{ data: projects, error: projectsError }, profiles] = await Promise.all([
-    supabase.from('projects').select('id, title').in('id', projectIds),
-    getProfiles(inviterIds),
-  ]);
-  if (projectsError) throw projectsError;
-  const titles = new Map((projects ?? []).map((project) => [project.id, project.title]));
-
-  return memberRows.map((member) => ({
-    projectId: member.project_id,
-    projectTitle: titles.get(member.project_id) ?? 'Project',
-    inviterName: profileName(profiles.get(member.invited_by)),
+  return ((data ?? []) as PendingInvitationRow[]).map((invitation) => ({
+    projectId: invitation.project_id,
+    projectTitle: invitation.project_title,
+    inviterName: invitation.inviter_name,
   }));
 }
 
 export async function listProjectNotices(userId: string): Promise<ProjectNotice[]> {
   const { data, error } = await supabase
     .from('project_notifications')
-    .select('id, project_id, title, body, created_at')
+    .select('id, project_id, type, title, body, created_at, task_id')
     .eq('user_id', userId)
     .neq('type', 'project_invite')
-    .order('created_at', { ascending: false })
-    .limit(10);
+    .is('read_at', null)
+    .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []).map((notice) => ({
     id: notice.id,
     projectId: notice.project_id,
+    type: notice.type,
     title: notice.title,
     body: notice.body,
     createdAt: notice.created_at,
+    taskId: notice.task_id,
   }));
+}
+
+export async function listProjectConversationSummaries(): Promise<
+  ProjectConversationSummary[]
+> {
+  const { data, error } = await supabase.rpc('list_project_conversation_summaries');
+  if (error) throw error;
+  return ((data ?? []) as ProjectConversationRow[]).map((conversation) => ({
+    projectId: conversation.project_id,
+    projectTitle: conversation.project_title,
+    latestMessage: conversation.latest_message,
+    latestMessageAt: conversation.latest_message_at,
+    latestAuthorName: conversation.latest_author_name,
+    unreadCount: Number(conversation.unread_count ?? 0),
+  }));
+}
+
+export async function markProjectNotificationRead(
+  notificationId: string,
+  userId: string
+) {
+  const { error } = await supabase
+    .from('project_notifications')
+    .update({ read_at: new Date().toISOString() })
+    .eq('id', notificationId)
+    .eq('user_id', userId);
+  if (error) throw error;
+}
+
+export async function markProjectConversationRead(
+  projectId: string,
+  userId: string
+) {
+  const { error } = await supabase.from('project_chat_reads').upsert(
+    {
+      user_id: userId,
+      project_id: projectId,
+      last_read_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id,project_id' }
+  );
+  if (error) throw error;
 }
 
 export async function createProject(input: {
@@ -305,6 +390,22 @@ export async function createProjectTeam(input: {
   return teamId;
 }
 
+export async function removeProjectMember(projectId: string, userId: string) {
+  const { error } = await supabase.rpc('remove_project_member', {
+    p_project_id: projectId,
+    p_user_id: userId,
+  });
+  if (error) throw error;
+}
+
+export async function removeProjectTeamMember(teamId: string, userId: string) {
+  const { error } = await supabase.rpc('remove_project_team_member', {
+    p_team_id: teamId,
+    p_user_id: userId,
+  });
+  if (error) throw error;
+}
+
 export async function listProjectTeams(projectId: string): Promise<ProjectTeam[]> {
   const { data: teams, error } = await supabase
     .from('project_teams')
@@ -356,6 +457,55 @@ export async function listTeamTasks(teamIds: string[]): Promise<TeamTask[]> {
     deadline: task.deadline,
     status: task.status,
   }));
+}
+
+export async function listMyProjectTasks(
+  userId: string,
+  projects: Project[]
+): Promise<MyProjectTask[]> {
+  const { data: memberships, error: membershipsError } = await supabase
+    .from('project_team_members')
+    .select('team_id')
+    .eq('user_id', userId);
+  if (membershipsError) throw membershipsError;
+  const teamIds = [...new Set((memberships ?? []).map((membership) => membership.team_id))];
+  if (teamIds.length === 0) return [];
+
+  const { data: teams, error: teamsError } = await supabase
+    .from('project_teams')
+    .select('id, name, project_id')
+    .in('id', teamIds);
+  if (teamsError) throw teamsError;
+  if (!teams?.length) return [];
+
+  const { data: taskRows, error: tasksError } = await supabase
+    .from('project_team_tasks')
+    .select('id, team_id, title, deadline, status')
+    .in(
+      'team_id',
+      teams.map((team) => team.id)
+    )
+    .order('deadline');
+  if (tasksError) throw tasksError;
+
+  const projectNames = new Map(projects.map((project) => [project.id, project.title]));
+  const teamsById = new Map(teams.map((team) => [team.id, team]));
+  return (taskRows ?? []).flatMap((task) => {
+    const team = teamsById.get(task.team_id);
+    if (!team) return [];
+    return [
+      {
+        id: task.id,
+        teamId: task.team_id,
+        title: task.title,
+        deadline: task.deadline,
+        status: task.status,
+        projectId: team.project_id,
+        projectName: projectNames.get(team.project_id) ?? 'Project',
+        teamName: team.name,
+      },
+    ];
+  });
 }
 
 export async function createTeamTask(input: {

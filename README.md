@@ -43,7 +43,13 @@ This command will move the starter code to the **example** directory and create 
 
 ## Project collaboration backend
 
-Project membership, invitations, team roles, task permissions, chat messages, notifications, and private shared files use Supabase. Before using these features, apply `supabase/migrations/20261125120000_project_collaboration.sql` to the Supabase project configured by `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. The migration creates the required tables, row-level security policies, notification triggers, realtime publication entries, and the private `project-files` storage bucket.
+Project membership, invitations, team roles, task permissions, chat messages, notifications, and private shared files use Supabase. Apply these migrations in order to the Supabase project configured by `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`:
+
+1. `supabase/migrations/20261125120000_project_collaboration.sql`
+2. `supabase/migrations/20261125150000_project_member_management.sql`
+3. `supabase/migrations/20261125160000_workspace_navigation.sql`
+
+Together they create the collaboration schema, row-level security policies, notification and task-assignment triggers, realtime publication entries, chat read cursors, the private `project-files` storage bucket, and authorization-checked member removal functions. Pending invitees can read their invitation details but cannot read the project or its content until they accept.
 
 Only signed-up accounts appear in member search. A project invitation grants project access only after the invitee accepts it.
 

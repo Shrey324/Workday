@@ -30,9 +30,23 @@ export type ProjectInvitation = {
 export type ProjectNotice = {
   id: string;
   projectId: string;
+  type:
+    | 'project_deadline_changed'
+    | 'team_task_deadline_changed'
+    | 'team_task_assigned';
   title: string;
   body: string;
   createdAt: string;
+  taskId: string | null;
+};
+
+export type ProjectConversationSummary = {
+  projectId: string;
+  projectTitle: string;
+  latestMessage: string | null;
+  latestMessageAt: string | null;
+  latestAuthorName: string | null;
+  unreadCount: number;
 };
 
 export type ChatAttachment = {
@@ -69,4 +83,10 @@ export type TeamTask = {
   title: string;
   deadline: string;
   status: 'in_progress' | 'done' | 'needs_more_time';
+};
+
+export type MyProjectTask = TeamTask & {
+  projectId: string;
+  projectName: string;
+  teamName: string;
 };
