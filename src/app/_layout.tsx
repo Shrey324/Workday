@@ -11,6 +11,7 @@ import {
 
 import {
   useColorScheme,
+  Platform,
   View,
   StyleSheet,
   Animated,
@@ -64,8 +65,6 @@ export default function RootLayout() {
       processedUrls.current.add(url);
 
       try {
-        console.log('Incoming authentication URL:', url);
-
         const parsedUrl = new URL(url);
         const hashParams = new URLSearchParams(
           parsedUrl.hash.replace(/^#/, '')
@@ -116,6 +115,26 @@ export default function RootLayout() {
         } else {
           console.log('No recovery credentials found in URL.');
           return;
+        }
+
+        if (Platform.OS === 'web' && typeof window !== 'undefined') {
+          const cleanUrl = new URL(window.location.href);
+          [
+            'code',
+            'token_hash',
+            'access_token',
+            'refresh_token',
+            'type',
+            'expires_at',
+            'expires_in',
+            'token_type',
+          ].forEach((parameter) => cleanUrl.searchParams.delete(parameter));
+          cleanUrl.hash = '';
+          window.history.replaceState(
+            window.history.state,
+            '',
+            `${cleanUrl.pathname}${cleanUrl.search}`
+          );
         }
 
         if (recoveryError) {

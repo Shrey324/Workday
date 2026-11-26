@@ -53,6 +53,12 @@ Together they create the collaboration schema, row-level security policies, noti
 
 Only signed-up accounts appear in member search. A project invitation grants project access only after the invitee accepts it.
 
+## Deploy the web app to Render
+
+The `render.yaml` Blueprint builds the Expo web single-page app and publishes `dist`, with a route fallback for Expo Router navigation. In Render, create a Blueprint from this repository and provide `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY` when prompted. These are client-side values; never use a Supabase service-role/secret key in this app.
+
+After the first deploy, add the Render site URL to Supabase Auth's allowed redirect URLs and set the appropriate site URL for password-reset and email-confirmation flows.
+
 ## Learn more
 
 To learn more about developing your project with Expo, look at the following resources:

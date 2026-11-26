@@ -200,6 +200,8 @@ export default function TabTwoScreen() {
   const [search, setSearch] = useState('');
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [activeProjectSection, setActiveProjectSection] =
+    useState<'teams' | 'chat'>('teams');
   const [mutedByProject, setMutedByProject] = useState<Record<string, boolean>>({});
   const [isProjectActionsOpen, setIsProjectActionsOpen] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -1073,6 +1075,7 @@ export default function TabTwoScreen() {
 
   const openProject = (projectId: string) => {
     setIsProjectActionsOpen(false);
+    setActiveProjectSection('teams');
     setActiveProjectId(projectId);
     setMessageDraft('');
     setPendingAttachment(null);
@@ -1312,6 +1315,23 @@ export default function TabTwoScreen() {
                       <Text style={styles.projectActionText}>Add members</Text>
                     </Pressable>
                   )}
+                  {isProjectAdmin && (
+                    <Pressable
+                      onPress={() => {
+                        setIsProjectActionsOpen(false);
+                        setProjectTitleDraft(activeProject.title);
+                        setProjectDescriptionDraft(activeProject.description);
+                        setProjectDeadlineDraft(activeProject.deadline);
+                        setProjectStatusDraft(activeProject.status);
+                        setIsProjectEditOpen(true);
+                      }}
+                      style={styles.projectActionItem}
+                      accessibilityRole="button"
+                    >
+                      <Feather name="edit-2" size={15} color={colors.ink} />
+                      <Text style={styles.projectActionText}>Edit project</Text>
+                    </Pressable>
+                  )}
                   <Pressable
                     onPress={() => {
                       setIsProjectActionsOpen(false);
@@ -1366,23 +1386,6 @@ export default function TabTwoScreen() {
               </View>
               <Text style={styles.summaryTitle}>{activeProject.title}</Text>
               <Text style={styles.summaryDescription}>{activeProject.description}</Text>
-              {isProjectAdmin && (
-                <Pressable
-                  onPress={() => {
-                    setProjectTitleDraft(activeProject.title);
-                    setProjectDescriptionDraft(activeProject.description);
-                    setProjectDeadlineDraft(activeProject.deadline);
-                    setProjectStatusDraft(activeProject.status);
-                    setIsProjectEditOpen(true);
-                  }}
-                  style={styles.editProjectButton}
-                  accessibilityRole="button"
-                >
-                  <Text style={styles.editProjectText}>
-                    <Feather name="edit-2" size={18} color="#000000" />
-                  </Text>
-                </Pressable>
-              )}
               <View style={styles.summaryDivider} />
               <View style={styles.summaryMetaRow}>
                 <View>
@@ -1426,6 +1429,57 @@ export default function TabTwoScreen() {
               </View>
             </View>
 
+            <View style={styles.detailSectionTabs}>
+              <Pressable
+                onPress={() => setActiveProjectSection('teams')}
+                style={[
+                  styles.detailSectionTab,
+                  activeProjectSection === 'teams' && styles.detailSectionTabActive,
+                ]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: activeProjectSection === 'teams' }}
+              >
+                <Feather
+                  name="users"
+                  size={15}
+                  color={activeProjectSection === 'teams' ? colors.orange : colors.muted}
+                />
+                <Text
+                  style={[
+                    styles.detailSectionTabLabel,
+                    activeProjectSection === 'teams' && styles.detailSectionTabLabelActive,
+                  ]}
+                >
+                  Project teams
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => setActiveProjectSection('chat')}
+                style={[
+                  styles.detailSectionTab,
+                  activeProjectSection === 'chat' && styles.detailSectionTabActive,
+                ]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: activeProjectSection === 'chat' }}
+              >
+                <Feather
+                  name="message-circle"
+                  size={15}
+                  color={activeProjectSection === 'chat' ? colors.orange : colors.muted}
+                />
+                <Text
+                  style={[
+                    styles.detailSectionTabLabel,
+                    activeProjectSection === 'chat' && styles.detailSectionTabLabelActive,
+                  ]}
+                >
+                  Team chat
+                </Text>
+              </Pressable>
+            </View>
+
+            {activeProjectSection === 'teams' && (
+              <>
             <View style={styles.teamsHeading}>
               <View>
                 <Text style={styles.chatTitle}>Project teams</Text>
@@ -1532,7 +1586,11 @@ export default function TabTwoScreen() {
                 );
               })
             )}
+              </>
+            )}
 
+            {activeProjectSection === 'chat' && (
+              <>
             <View style={styles.chatHeading}>
               <View>
                 <Text style={styles.chatTitle}>Team chat</Text>
@@ -1632,9 +1690,12 @@ export default function TabTwoScreen() {
                 );
               })
             )}
+              </>
+            )}
           </ScrollView>
 
-          <View style={styles.composerArea}>
+          {activeProjectSection === 'chat' && (
+            <View style={styles.composerArea}>
             {pendingAttachment && (
               <View style={styles.pendingFile}>
                 <Text style={styles.pendingFileText} numberOfLines={1}>
@@ -1686,6 +1747,7 @@ export default function TabTwoScreen() {
             </View>
             <Text style={styles.fileHint}>Attach screenshots, PDF, Excel or Word files</Text>
           </View>
+          )}
         </KeyboardAvoidingView>
         <WorkspaceBottomNavigation
           activeTab={activeTab}
@@ -3885,6 +3947,34 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     paddingBottom: 24,
   },
+  detailSectionTabs: {
+    flexDirection: 'row',
+    marginTop: 14,
+    marginBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  detailSectionTab: {
+    flex: 1,
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  detailSectionTabActive: {
+    borderBottomColor: colors.orange,
+  },
+  detailSectionTabLabel: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  detailSectionTabLabelActive: {
+    color: colors.orange,
+  },
   projectSummaryCard: {
     padding: 17,
     borderWidth: 1,
@@ -4431,16 +4521,6 @@ const styles = StyleSheet.create({
   },
   adminLabel: {
     color: '#C45A12',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  editProjectButton: {
-    alignSelf: 'flex-start',
-    marginTop: 10,
-    paddingVertical: 5,
-  },
-  editProjectText: {
-    color: colors.ink,
     fontSize: 10,
     fontWeight: '700',
   },
