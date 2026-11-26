@@ -327,6 +327,11 @@ export default function RootLayout() {
             <Stack.Screen name="explore" />
             <Stack.Screen name="forgot-password" />
             <Stack.Screen name="reset-password" />
+            <Stack.Screen name="profile" />
+            <Stack.Screen name="personal-information" />
+            <Stack.Screen name="change-password" />
+            <Stack.Screen name="new-password" />
+            <Stack.Screen name="notifications" />
           </Stack>
         )}
       </View>

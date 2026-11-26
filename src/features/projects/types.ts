@@ -74,6 +74,7 @@ export type ProjectTeamMember = ProjectMember & {
 export type ProjectTeam = {
   id: string;
   name: string;
+  createdBy: string | null;
   members: ProjectTeamMember[];
 };
 

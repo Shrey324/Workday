@@ -24,6 +24,8 @@ import {
   createProjectFileUrl,
   createProjectTeam,
   createTeamTask,
+  deleteProject as deleteProjectRecord,
+  deleteProjectTeam as deleteProjectTeamRecord,
   inviteProjectMembers,
   leaveProject,
   listMyProjectTasks,
@@ -83,6 +85,9 @@ const colors = {
   amberBg: '#FBF2E3',
   orange: '#D76A24',
 };
+
+const createRealtimeTopic = (topic: string) =>
+  `${topic}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const toDateInputValue = (date: Date) => {
   const year = date.getFullYear();
@@ -196,12 +201,10 @@ export default function TabTwoScreen() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [mutedByProject, setMutedByProject] = useState<Record<string, boolean>>({});
+  const [isProjectActionsOpen, setIsProjectActionsOpen] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [currentUserName, setCurrentUserName] = useState('You');
-  const [currentUserEmail, setCurrentUserEmail] = useState('');
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
-  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isTaskDetailsOpen, setIsTaskDetailsOpen] = useState(false);
   const [isMemberListOpen, setIsMemberListOpen] = useState(false);
@@ -280,10 +283,6 @@ export default function TabTwoScreen() {
       }
       if (!isMounted) return;
       setCurrentUserId(data.user.id);
-      setCurrentUserName(
-        data.user.user_metadata?.full_name || data.user.email || 'You'
-      );
-      setCurrentUserEmail(data.user.email ?? '');
     };
     void loadUser();
     return () => {
@@ -310,7 +309,7 @@ export default function TabTwoScreen() {
     void loadWorkspace();
 
     const channel = supabase
-      .channel(`project-inbox-${currentUserId}`)
+      .channel(createRealtimeTopic(`project-inbox-${currentUserId}`))
       .on(
         'postgres_changes',
         {
@@ -407,7 +406,7 @@ export default function TabTwoScreen() {
     void refreshProject();
 
     const channel = supabase
-      .channel(`project-detail-${activeProjectId}`)
+      .channel(createRealtimeTopic(`project-detail-${activeProjectId}`))
       .on(
         'postgres_changes',
         {
@@ -459,7 +458,7 @@ export default function TabTwoScreen() {
     const teamIds = activeTeams.map((team) => team.id);
     const channels = activeTeams.map((team) =>
       supabase
-        .channel(`team-tasks-${team.id}`)
+        .channel(createRealtimeTopic(`team-tasks-${team.id}`))
         .on(
           'postgres_changes',
           {
@@ -498,13 +497,13 @@ export default function TabTwoScreen() {
     let isMounted = true;
     const timer = setTimeout(() => {
       setIsSearchingMembers(true);
-      void searchProjectUsers(memberInput, currentUserId)
+      void searchProjectUsers(
+        memberInput,
+        currentUserId,
+        selectedUsers.map((user) => user.id)
+      )
         .then((users) => {
-          if (isMounted) {
-            setMemberSuggestions(
-              users.filter((user) => !selectedUsers.some((selected) => selected.id === user.id))
-            );
-          }
+          if (isMounted) setMemberSuggestions(users);
         })
         .catch((error) => {
           if (!isMounted) return;
@@ -530,17 +529,12 @@ export default function TabTwoScreen() {
     let isMounted = true;
     const timer = setTimeout(() => {
       setIsSearchingProjectUsers(true);
-      void searchProjectUsers(addMemberQuery, currentUserId)
+      void searchProjectUsers(addMemberQuery, currentUserId, [
+        ...projectUserIds,
+        ...selectedProjectInvitees.map((user) => user.id),
+      ])
         .then((users) => {
-          if (isMounted) {
-            setAddMemberSuggestions(
-              users.filter(
-                (user) =>
-                  !projectUserIds.includes(user.id) &&
-                  !selectedProjectInvitees.some((selected) => selected.id === user.id)
-              )
-            );
-          }
+          if (isMounted) setAddMemberSuggestions(users);
         })
         .catch((error) => {
           console.error('Unable to search signed-up users:', error);
@@ -592,6 +586,10 @@ export default function TabTwoScreen() {
   ).length;
   const overdueTaskCount = myTasks.filter(isTaskOverdue).length;
   const notificationCount = invitations.length + notices.length;
+  const unreadMessageCount = conversations.reduce(
+    (total, conversation) => total + conversation.unreadCount,
+    0
+  );
 
   const handleLogout = async () => {
     try {
@@ -840,6 +838,53 @@ export default function TabTwoScreen() {
     }
   };
 
+  const confirmDeleteProject = () => {
+    if (!activeProject || !isProjectAdmin || !currentUserId) return;
+    const projectId = activeProject.id;
+    const projectTitle = activeProject.title;
+    const userId = currentUserId;
+    setIsProjectActionsOpen(false);
+    Alert.alert(
+      'Delete project?',
+      `Delete ${projectTitle} and all its project data? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete project',
+          style: 'destructive',
+          onPress: () => {
+            void deleteProjectRecord(projectId)
+              .then(async () => {
+                setProjects((current) =>
+                  current.filter((project) => project.id !== projectId)
+                );
+                setActiveProjectId(null);
+                try {
+                  await refreshWorkspace(userId);
+                } catch (error) {
+                  console.error(
+                    'Project deleted, but the workspace could not refresh:',
+                    error
+                  );
+                  Alert.alert(
+                    'Project deleted',
+                    'The project was deleted, but the workspace could not refresh. Reopen the workspace to update it.'
+                  );
+                }
+              })
+              .catch((error) => {
+                console.error('Unable to delete project:', error);
+                Alert.alert(
+                  'Unable to delete project',
+                  error instanceof Error ? error.message : 'Please try again.'
+                );
+              });
+          },
+        },
+      ]
+    );
+  };
+
   const sendProjectInvitations = async () => {
     if (
       !activeProject ||
@@ -987,7 +1032,47 @@ export default function TabTwoScreen() {
     );
   };
 
+  const confirmDeleteProjectTeam = (team: ProjectTeam) => {
+    if (!activeProject || !currentUserId) return;
+    const projectId = activeProject.id;
+    Alert.alert(
+      'Delete team?',
+      `Delete ${team.name} and its assigned tasks?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void deleteProjectTeamRecord(team.id)
+              .then(() => {
+                setTeamsByProject((current) => ({
+                  ...current,
+                  [projectId]: (current[projectId] ?? []).filter(
+                    (currentTeam) => currentTeam.id !== team.id
+                  ),
+                }));
+                setTasksByTeam((current) => {
+                  const next = { ...current };
+                  delete next[team.id];
+                  return next;
+                });
+              })
+              .catch((error) => {
+                console.error('Unable to delete project team:', error);
+                Alert.alert(
+                  'Unable to delete team',
+                  error instanceof Error ? error.message : 'Please try again.'
+                );
+              });
+          },
+        },
+      ]
+    );
+  };
+
   const openProject = (projectId: string) => {
+    setIsProjectActionsOpen(false);
     setActiveProjectId(projectId);
     setMessageDraft('');
     setPendingAttachment(null);
@@ -1186,7 +1271,10 @@ export default function TabTwoScreen() {
         >
           <View style={styles.detailHeader}>
             <Pressable
-              onPress={() => setActiveProjectId(null)}
+              onPress={() => {
+                setIsProjectActionsOpen(false);
+                setActiveProjectId(null);
+              }}
               style={styles.backButton}
               accessibilityRole="button"
               accessibilityLabel="Back to projects"
@@ -1199,28 +1287,71 @@ export default function TabTwoScreen() {
                 {activeProject.title}
               </Text>
             </View>
-            {isProjectAdmin && (
+            <View style={styles.projectActionsAnchor}>
               <Pressable
-                onPress={() => void openAddMembersSheet()}
+                onPress={() => setIsProjectActionsOpen((open) => !open)}
                 style={styles.headerIconButton}
                 accessibilityRole="button"
-                accessibilityLabel="Add project members"
+                accessibilityLabel="Project options"
+                accessibilityState={{ expanded: isProjectActionsOpen }}
               >
-                <Feather name="plus" size={21} color={colors.ink} />
+                <Feather name="more-vertical" size={20} color={colors.ink} />
               </Pressable>
-            )}
-            <Pressable
-              onPress={() => toggleProjectMute(activeProject.id)}
-              style={styles.headerIconButton}
-              accessibilityRole="button"
-              accessibilityLabel={mutedByProject[activeProject.id] ? 'Unmute project' : 'Mute project'}
-            >
-              <Text style={styles.headerIconText}>
-                {mutedByProject[activeProject.id] ? '🔇' : '🔊'}
-              </Text>
-            </Pressable>
+              {isProjectActionsOpen && (
+                <View style={styles.projectActionsDropdown}>
+                  {isProjectAdmin && (
+                    <Pressable
+                      onPress={() => {
+                        setIsProjectActionsOpen(false);
+                        void openAddMembersSheet();
+                      }}
+                      style={styles.projectActionItem}
+                      accessibilityRole="button"
+                    >
+                      <Feather name="user-plus" size={15} color={colors.ink} />
+                      <Text style={styles.projectActionText}>Add members</Text>
+                    </Pressable>
+                  )}
+                  <Pressable
+                    onPress={() => {
+                      setIsProjectActionsOpen(false);
+                      toggleProjectMute(activeProject.id);
+                    }}
+                    style={styles.projectActionItem}
+                    accessibilityRole="button"
+                  >
+                    <Feather
+                      name={mutedByProject[activeProject.id] ? 'volume-2' : 'volume-x'}
+                      size={15}
+                      color={colors.ink}
+                    />
+                    <Text style={styles.projectActionText}>
+                      {mutedByProject[activeProject.id] ? 'Unmute project' : 'Mute project'}
+                    </Text>
+                  </Pressable>
+                  {isProjectAdmin && (
+                    <Pressable
+                      onPress={confirmDeleteProject}
+                      style={styles.projectActionItem}
+                      accessibilityRole="button"
+                    >
+                      <Feather name="trash-2" size={15} color="#C64F3D" />
+                      <Text style={styles.deleteProjectActionText}>Delete project</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
+            </View>
           </View>
 
+          {isProjectActionsOpen && (
+            <Pressable
+              onPress={() => setIsProjectActionsOpen(false)}
+              style={styles.projectActionsDismiss}
+              accessibilityRole="button"
+              accessibilityLabel="Close project options"
+            />
+          )}
           <ScrollView
             style={styles.detailScroll}
             contentContainerStyle={styles.detailScrollContent}
@@ -1323,12 +1454,15 @@ export default function TabTwoScreen() {
               </Text>
             ) : (
               teams.map((team) => {
+                const isTeamLeader = team.members.some(
+                  (member) =>
+                    member.id === currentUserId && member.teamRole === 'leader'
+                );
                 const canManageTeam =
-                  isProjectAdmin ||
-                  team.members.some(
-                    (member) =>
-                      member.id === currentUserId && member.teamRole === 'leader'
-                  );
+                  isProjectAdmin || isTeamLeader;
+                const canDeleteTeam =
+                  team.createdBy === currentUserId &&
+                  (isProjectAdmin || isTeamLeader);
                 return (
                   <View key={team.id} style={styles.teamCard}>
                     <View style={styles.teamHeader}>
@@ -1360,13 +1494,25 @@ export default function TabTwoScreen() {
                         </View>
                       </View>
                       {canManageTeam && (
-                        <Pressable
-                          onPress={() => openTaskEditor(team.id)}
-                          style={styles.smallActionButton}
-                          accessibilityRole="button"
-                        >
-                          <Text style={styles.smallActionText}>Assign task</Text>
-                        </Pressable>
+                        <View style={styles.teamActions}>
+                          <Pressable
+                            onPress={() => openTaskEditor(team.id)}
+                            style={styles.smallActionButton}
+                            accessibilityRole="button"
+                          >
+                            <Text style={styles.smallActionText}>Assign task</Text>
+                          </Pressable>
+                          {canDeleteTeam && (
+                            <Pressable
+                              onPress={() => confirmDeleteProjectTeam(team)}
+                              style={styles.deleteTeamButton}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Delete ${team.name}`}
+                            >
+                              <Feather name="x" size={15} color="#C64F3D" />
+                            </Pressable>
+                          )}
+                        </View>
                       )}
                     </View>
                     {(tasksByTeam[team.id] ?? []).length === 0 ? (
@@ -1541,7 +1687,11 @@ export default function TabTwoScreen() {
             <Text style={styles.fileHint}>Attach screenshots, PDF, Excel or Word files</Text>
           </View>
         </KeyboardAvoidingView>
-        <WorkspaceBottomNavigation activeTab={activeTab} onSelect={navigateToTab} />
+        <WorkspaceBottomNavigation
+          activeTab={activeTab}
+          onSelect={navigateToTab}
+          unreadMessageCount={unreadMessageCount}
+        />
         <Modal
           visible={isProjectEditOpen}
           transparent
@@ -1957,7 +2107,7 @@ export default function TabTwoScreen() {
                   <Pressable
                     onPress={() => {
                       setIsProfileMenuOpen(false);
-                      setIsProfileModalOpen(true);
+                      router.push('/profile');
                     }}
                     style={styles.profileMenuItem}
                     accessibilityRole="button"
@@ -2008,59 +2158,6 @@ export default function TabTwoScreen() {
             </Pressable>
           </View>
         </View>
-
-        {invitations.length > 0 && (
-          <View style={styles.inboxSection}>
-            <Text style={styles.sectionTitle}>Project invitations</Text>
-            {invitations.map((invitation) => (
-              <View key={invitation.projectId} style={styles.invitationCard}>
-                <View style={styles.invitationCopy}>
-                  <Text style={styles.invitationTitle}>{invitation.projectTitle}</Text>
-                  <Text style={styles.invitationText}>
-                    {invitation.inviterName} wanted to add you to the Project.
-                  </Text>
-                </View>
-                <View style={styles.invitationActions}>
-                  <Pressable
-                    onPress={() => void respondToInvitation(invitation, true)}
-                    style={styles.acceptButton}
-                    accessibilityRole="button"
-                  >
-                    <Text style={styles.acceptButtonText}>Accept</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => void respondToInvitation(invitation, false)}
-                    style={styles.denyButton}
-                    accessibilityRole="button"
-                  >
-                    <Text style={styles.denyButtonText}>Deny</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {notices.length > 0 && (
-          <View style={styles.inboxSection}>
-            <Text style={styles.sectionTitle}>Updates</Text>
-            {notices.map((notice) => (
-              <Pressable
-                key={notice.id}
-                onPress={() =>
-                  notice.type === 'team_task_assigned'
-                    ? void openTaskFromNotification(notice)
-                    : void openProjectNotice(notice)
-                }
-                style={styles.noticeCard}
-                accessibilityRole="button"
-              >
-                <Text style={styles.noticeTitle}>{notice.title}</Text>
-                <Text style={styles.noticeText}>{notice.body}</Text>
-              </Pressable>
-            ))}
-          </View>
-        )}
 
         <View style={styles.statsRow}>
           <View style={[styles.statCard, styles.totalStatCard]}>
@@ -2358,7 +2455,11 @@ export default function TabTwoScreen() {
         )}
       </ScrollView>
 
-      <WorkspaceBottomNavigation activeTab={activeTab} onSelect={navigateToTab} />
+      <WorkspaceBottomNavigation
+        activeTab={activeTab}
+        onSelect={navigateToTab}
+        unreadMessageCount={unreadMessageCount}
+      />
 
       <Modal
         visible={isCreateOpen}
@@ -2651,41 +2752,6 @@ export default function TabTwoScreen() {
           </View>
         </View>
       </Modal>
-      <Modal
-        visible={isProfileModalOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setIsProfileModalOpen(false)}
-      >
-        <View style={styles.profileModalBackdrop}>
-          <Pressable
-            style={styles.profileModalDismiss}
-            onPress={() => setIsProfileModalOpen(false)}
-            accessibilityRole="button"
-            accessibilityLabel="Close profile"
-          />
-          <View style={styles.profileCard}>
-            <View style={styles.profileCardHeader}>
-              <Text style={styles.dialogTitle}>Profile</Text>
-              <Pressable
-                onPress={() => setIsProfileModalOpen(false)}
-                style={styles.sheetCloseButton}
-                accessibilityRole="button"
-                accessibilityLabel="Close profile"
-              >
-                <Feather name="x" size={18} color={colors.ink} />
-              </Pressable>
-            </View>
-            <View style={styles.profileDetails}>
-              <View style={styles.profileAvatar}>
-                <Feather name="user" size={23} color={colors.ink} />
-              </View>
-              <Text style={styles.profileName}>{currentUserName}</Text>
-              <Text style={styles.profileEmail}>{currentUserEmail}</Text>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
@@ -2693,9 +2759,11 @@ export default function TabTwoScreen() {
 function WorkspaceBottomNavigation({
   activeTab,
   onSelect,
+  unreadMessageCount,
 }: {
   activeTab: WorkspaceTab;
   onSelect: (tab: WorkspaceTab) => void;
+  unreadMessageCount: number;
 }) {
   const items: { tab: WorkspaceTab; label: string; icon: 'home' | 'folder' | 'check-square' | 'message-circle' }[] = [
     { tab: 'home', label: 'Home', icon: 'home' },
@@ -2714,14 +2782,27 @@ function WorkspaceBottomNavigation({
             onPress={() => onSelect(item.tab)}
             style={styles.bottomNavigationItem}
             accessibilityRole="button"
-            accessibilityLabel={item.label}
+            accessibilityLabel={
+              item.tab === 'messages' && unreadMessageCount > 0
+                ? `${item.label}, ${unreadMessageCount} unread messages`
+                : item.label
+            }
             accessibilityState={{ selected: isActive }}
           >
-            <Feather
-              name={item.icon}
-              size={19}
-              color={isActive ? colors.orange : colors.muted}
-            />
+            <View style={styles.bottomNavigationIcon}>
+              <Feather
+                name={item.icon}
+                size={19}
+                color={isActive ? colors.orange : colors.muted}
+              />
+              {item.tab === 'messages' && unreadMessageCount > 0 && (
+                <View style={styles.messagesBadge}>
+                  <Text style={styles.messagesBadgeText}>
+                    {unreadMessageCount > 99 ? '99+' : unreadMessageCount}
+                  </Text>
+                </View>
+              )}
+            </View>
             <Text
               style={[
                 styles.bottomNavigationLabel,
@@ -2970,6 +3051,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
+  },
+  bottomNavigationIcon: {
+    position: 'relative',
+  },
+  messagesBadge: {
+    position: 'absolute',
+    top: -7,
+    right: -11,
+    minWidth: 15,
+    height: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+    borderRadius: 8,
+    backgroundColor: colors.orange,
+  },
+  messagesBadgeText: {
+    color: colors.white,
+    fontSize: 8,
+    fontWeight: '700',
   },
   bottomNavigationLabel: {
     color: colors.muted,
@@ -3680,6 +3781,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.canvas,
   },
   detailHeader: {
+    position: 'relative',
+    zIndex: 5,
     minHeight: 68,
     flexDirection: 'row',
     alignItems: 'center',
@@ -3726,9 +3829,50 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#F3F3F2',
   },
-  headerIconText: {
+  projectActionsDismiss: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 4,
+  },
+  projectActionsAnchor: {
+    position: 'relative',
+    zIndex: 10,
+  },
+  projectActionsDropdown: {
+    position: 'absolute',
+    top: 42,
+    right: 0,
+    width: 182,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: 9,
+    backgroundColor: colors.white,
+    shadowColor: '#000000',
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  projectActionItem: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+  },
+  projectActionText: {
     color: colors.ink,
-    fontSize: 17,
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  deleteProjectActionText: {
+    color: '#C64F3D',
+    fontSize: 11,
+    fontWeight: '600',
   },
   detailScroll: {
     flex: 1,
@@ -4352,6 +4496,19 @@ const styles = StyleSheet.create({
   teamHeaderText: {
     flex: 1,
   },
+  teamActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  deleteTeamButton: {
+    width: 30,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 15,
+    backgroundColor: '#FCE9E7',
+  },
   teamName: {
     color: colors.ink,
     fontSize: 12,
@@ -4598,55 +4755,6 @@ const styles = StyleSheet.create({
   addMembersPicker: {
     maxHeight: 350,
     marginBottom: 13,
-  },
-  profileModalBackdrop: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-    backgroundColor: 'rgba(0,0,0,0.38)',
-  },
-  profileModalDismiss: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-  },
-  profileCard: {
-    width: '100%',
-    maxWidth: 380,
-    padding: 20,
-    borderRadius: 14,
-    backgroundColor: colors.white,
-  },
-  profileCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  profileDetails: {
-    alignItems: 'center',
-    paddingVertical: 18,
-  },
-  profileAvatar: {
-    width: 54,
-    height: 54,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 11,
-    borderRadius: 27,
-    backgroundColor: '#E8E5E0',
-  },
-  profileName: {
-    color: colors.ink,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  profileEmail: {
-    color: colors.muted,
-    fontSize: 10,
-    marginTop: 5,
   },
   dialogCard: {
     width: '100%',

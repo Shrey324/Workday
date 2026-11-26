@@ -33,6 +33,13 @@
           "imageWidth": 76
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow MyFirstApp to access your photos to set your profile picture.",
+          "microphonePermission": false
+        }
+      ],
       "expo-sqlite"
     ],
     "experiments": {

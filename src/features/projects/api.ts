@@ -40,14 +40,23 @@ async function getProfiles(ids: string[]) {
   return new Map((data ?? []).map((profile) => [profile.id, profile]));
 }
 
-export async function searchProjectUsers(query: string, currentUserId: string) {
-  const { data, error } = await supabase
+export async function searchProjectUsers(
+  query: string,
+  currentUserId: string,
+  excludedUserIds: string[] = []
+) {
+  const excludedIds = [
+    ...new Set([currentUserId, ...excludedUserIds]),
+  ];
+  let userQuery = supabase
     .from('profiles')
     .select('id, full_name')
     .ilike('full_name', `%${query.trim()}%`)
-    .neq('id', currentUserId)
-    .order('full_name')
-    .limit(8);
+    .order('full_name');
+  if (excludedIds.length > 0) {
+    userQuery = userQuery.not('id', 'in', `(${excludedIds.join(',')})`);
+  }
+  const { data, error } = await userQuery.limit(8);
   if (error) throw error;
   return (data ?? []).map(
     (profile): UserProfile => ({ id: profile.id, fullName: profile.full_name })
@@ -98,10 +107,38 @@ export async function inviteProjectMembers(
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const { data: projectRows, error } = await supabase
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!user) return [];
+
+  const { data: acceptedMemberships, error: membershipsError } = await supabase
+    .from('project_members')
+    .select('project_id')
+    .eq('user_id', user.id)
+    .eq('status', 'accepted');
+  if (membershipsError) throw membershipsError;
+
+  const acceptedProjectIds = (acceptedMemberships ?? []).map(
+    (membership) => membership.project_id
+  );
+  let projectQuery = supabase
     .from('projects')
-    .select('id, title, description, deadline, status, created_by')
-    .order('created_at', { ascending: false });
+    .select('id, title, description, deadline, status, created_by');
+  if (acceptedProjectIds.length > 0) {
+    projectQuery = projectQuery.or(
+      `created_by.eq.${user.id},id.in.(${acceptedProjectIds.join(',')})`
+    );
+  } else {
+    projectQuery = projectQuery.eq('created_by', user.id);
+  }
+
+  const { data: projectRows, error } = await projectQuery.order(
+    'created_at',
+    { ascending: false }
+  );
   if (error) throw error;
   if (!projectRows?.length) return [];
 
@@ -406,10 +443,24 @@ export async function removeProjectTeamMember(teamId: string, userId: string) {
   if (error) throw error;
 }
 
+export async function deleteProjectTeam(teamId: string) {
+  const { error } = await supabase.rpc('delete_project_team', {
+    p_team_id: teamId,
+  });
+  if (error) throw error;
+}
+
+export async function deleteProject(projectId: string) {
+  const { error } = await supabase.rpc('delete_project', {
+    p_project_id: projectId,
+  });
+  if (error) throw error;
+}
+
 export async function listProjectTeams(projectId: string): Promise<ProjectTeam[]> {
   const { data: teams, error } = await supabase
     .from('project_teams')
-    .select('id, name')
+    .select('id, name, created_by')
     .eq('project_id', projectId)
     .order('created_at');
   if (error) throw error;
@@ -429,6 +480,7 @@ export async function listProjectTeams(projectId: string): Promise<ProjectTeam[]
   return teams.map((team) => ({
     id: team.id,
     name: team.name,
+    createdBy: team.created_by,
     members: (teamMembers ?? [])
       .filter((member) => member.team_id === team.id)
       .map(
